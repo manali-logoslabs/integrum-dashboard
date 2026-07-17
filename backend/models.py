@@ -1,5 +1,10 @@
 """
-SQLAlchemy ORM models — mirrors schema.sql exactly.
+SQLAlchemy ORM models -- intended to mirror schema_v2.sql exactly, but
+several classes (User, SavingsSummary, and others used by auth.py,
+savings.py, generation.py, performance.py, plants.py, settlement.py)
+are currently out of sync with the real table/column names in
+schema_v2.sql (e.g. User.__tablename__ = "users" vs the real
+"tenant_users"). See the tracked follow-up task for the fix.
 All multi-tenant tables carry tenant_id for row-level scoping.
 """
 from datetime import datetime, date, time

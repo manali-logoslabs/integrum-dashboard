@@ -284,14 +284,25 @@ Expected result:
 
 ## Part 7 — Loading New Data in the Future
 
-When you receive new generation data, consumption data, DISCOM bills, or any other operational data:
+The one-time `GIL/` and `C9/` raw source dumps that `run_migration.py` originally
+read have been removed from the repo now that their data is fully migrated
+and verified in PostgreSQL (Schema v2) — the application never reads them at
+runtime, only the database. `run_migration.py` and `schema_v2.sql` remain as
+a record of how that initial migration was done; they are not meant to be
+re-run against new data going forward.
 
-1. Place the new SQL file(s) in the appropriate folder (`D:\Integrum_dashboard\GIL\` or `D:\Integrum_dashboard\C9\`).
-2. The migration script is designed to use `INSERT ... ON CONFLICT DO UPDATE` — this means running it again will **add new rows and update existing ones** without deleting anything.
-3. Simply open Command Prompt, go to `D:\Integrum_dashboard`, and run `python run_migration.py` again.
-4. Refresh DBeaver to see the new data.
+For new generation data, consumption data, DISCOM bills, or other operational
+data, use the app's own ingestion path instead:
 
-No schema changes are needed. The new data will fit into the existing tables automatically.
+1. For C9, use the upload endpoint in `backend/routes/c9_upload.py` — this
+   is the supported, ongoing way to load new C9 data directly into
+   PostgreSQL through the running API. GIL has no equivalent upload route
+   yet; add one following the same pattern before GIL needs recurring data
+   loads.
+2. Data lands straight in the Schema v2 tables; no local dump files or
+   manual scripts are involved.
+
+No schema changes are needed for new data of a kind Schema v2 already models.
 
 ---
 
