@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# Environment secrets
+.env
+!.env.example
+
+# Local tooling (portable PostgreSQL + pgAdmin install, unused -- Docker
+# Compose is the primary Postgres setup for this project)
+.tools/
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# OS
+Thumbs.db
+.DS_Store

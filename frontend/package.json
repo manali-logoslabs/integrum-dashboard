@@ -1,0 +1,30 @@
+{
+  "name": "integrum-dashboard",
+  "version": "1.0.0",
+  "description": "Integrum Energy — C9 Renewable Energy Analytics Dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev":     "vite",
+    "build":   "tsc && vite build",
+    "preview": "vite preview",
+    "lint":    "eslint src --ext ts,tsx --report-unused-disable-directives"
+  },
+  "dependencies": {
+    "react":              "^18.3.1",
+    "react-dom":          "^18.3.1",
+    "chart.js":           "^4.4.4",
+    "react-chartjs-2":    "^5.2.0",
+    "axios":              "^1.7.7",
+    "react-router-dom":   "^6.26.2",
+    "date-fns":           "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/react":       "^18.3.5",
+    "@types/react-dom":   "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript":         "^5.5.3",
+    "vite":               "^5.4.8",
+    "eslint":             "^9.9.0"
+  }
+}

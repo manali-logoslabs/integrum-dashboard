@@ -1,0 +1,59 @@
+version: "3.9"
+
+volumes:
+  postgres_data:
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: integrum
+      POSTGRES_PASSWORD: integrum_pass
+      POSTGRES_DB: integrum
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema_v2.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./seed_all_months.sql:/docker-entrypoint-initdb.d/02-seed.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U integrum -d integrum"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ───────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://integrum:integrum_pass@db:5432/integrum
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      DEBUG: ${DEBUG:-false}
+      ALLOWED_ORIGINS: '["http://localhost:5173","http://localhost:3000","http://localhost:8080"]'
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── MCP Server ────────────────────────────────────────────
+  mcp:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://integrum:integrum_pass@db:5432/integrum
+    stdin_open: true
+    tty: true
