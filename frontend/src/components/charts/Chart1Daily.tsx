@@ -47,9 +47,9 @@ function monthMinus(month: string, n: number): string {
 function Chart1Monthly({ fromMonth, toMonth, anchorMonth, unitIds }: {
   fromMonth?: string; toMonth?: string; anchorMonth: string; unitIds?: string
 }) {
-  // Default: last 12 months ending at anchorMonth
+  // Default: show only the selected month (no range = single month)
   const to   = toMonth   || anchorMonth
-  const from = fromMonth || monthMinus(to, 11)
+  const from = fromMonth || anchorMonth
 
   const { data, loading } = useApi(
     () => api.c9.monthlyAggregate(from, to, unitIds ? { unit_ids: unitIds } : undefined),
