@@ -804,3 +804,140 @@ async def savings_heatmap(
         rows = (await db.execute(sql)).mappings().all()
 
     return [_row(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Monthly Aggregate — multi-month trend for Chart 1 Monthly view
+# ---------------------------------------------------------------------------
+
+@router.get("/monthly-aggregate")
+async def monthly_aggregate(
+    from_month: str = Query("2025-08", description="Start month YYYY-MM"),
+    to_month:   str = Query("2025-11", description="End month YYYY-MM (inclusive)"),
+    unit_ids:   str = Query("", description="Comma-separated unit IDs (empty = all)"),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """
+    Month-by-month energy flow for the Chart 1 Monthly view.
+    Returns one row per calendar month with:
+      generation_kwh, consumption_kwh, matched_kwh, banking_kwh,
+      grid_kwh, lapsed_kwh, savings_inr, grid_cost_inr, savings_pct.
+
+    Source of truth: monthly_banking_settlement (mbs)
+      - matched_kwh  = mbs.direct_matched_kwh
+      - banking_kwh  = mbs.banking_utilised_kwh  (withdrawals, not deposits)
+      - grid_kwh     = GREATEST(unmet_demand - banking_utilised, 0) per unit, summed
+      - lapsed_kwh   = mbs.surplus_lapsed_kwh; fallback via 8% BESCOM banking loss
+    Grid and Lapsed are mutually exclusive per month.
+    """
+    from_date = _month_str(from_month)
+    to_d      = _month_str(to_month)
+    to_end    = (to_d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+    uid_list = _parse_unit_ids(unit_ids)
+    uid_sql, uid_params = _uid_clause(uid_list)
+    sav_params = {"from_date": from_date, "to_end": to_end, **uid_params}
+
+    # Generation from 15-min plant readings
+    gen_sql = text("""
+        SELECT
+            DATE_TRUNC('month', slot_start_time AT TIME ZONE 'Asia/Kolkata')::DATE AS m,
+            SUM(generation_kwh) AS gen_kwh
+        FROM generation_readings
+        WHERE tenant_id = 1
+          AND (slot_start_time AT TIME ZONE 'Asia/Kolkata')::DATE
+              BETWEEN :from_date AND :to_end
+        GROUP BY m ORDER BY m
+    """)
+    gen_map = {
+        str(r["m"])[:7]: float(r["gen_kwh"] or 0)
+        for r in (await db.execute(gen_sql, {"from_date": from_date, "to_end": to_end})).mappings().all()
+    }
+
+    # Cost/savings from savings_summary
+    cost_sql = text(f"""
+        SELECT
+            TO_CHAR(ss.month, 'YYYY-MM')   AS m,
+            SUM(ss.grid_cost_without_re)   AS grid_cost_inr,
+            SUM(ss.savings_with_banking)   AS savings_inr
+        FROM savings_summary ss
+        JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
+        WHERE ss.tenant_id = 1
+          AND ss.month BETWEEN :from_date AND :to_end
+          {uid_sql}
+        GROUP BY ss.month ORDER BY ss.month
+    """)
+    cost_map = {
+        r["m"]: dict(r)
+        for r in (await db.execute(cost_sql, sav_params)).mappings().all()
+    }
+
+    # Settlement breakdown from monthly_banking_settlement — single source of truth
+    try:
+        mbs_sql = text(f"""
+            SELECT
+                TO_CHAR(mbs.month, 'YYYY-MM')                                   AS m,
+                SUM(mbs.total_consumption_kwh)                                   AS cons_kwh,
+                SUM(mbs.direct_matched_kwh)                                      AS matched_kwh,
+                SUM(mbs.banking_utilised_kwh)                                    AS banking_kwh,
+                SUM(COALESCE(mbs.surplus_lapsed_kwh, 0))                        AS lapsed_kwh,
+                SUM(GREATEST(
+                    mbs.unmet_demand_kwh - COALESCE(mbs.banking_utilised_kwh, 0),
+                    0
+                ))                                                                AS grid_kwh
+            FROM monthly_banking_settlement mbs
+            JOIN consumption_units cu ON cu.id = mbs.consumption_unit_id
+            WHERE mbs.tenant_id = 1
+              AND mbs.month BETWEEN :from_date AND :to_end
+              {uid_sql}
+            GROUP BY mbs.month ORDER BY mbs.month
+        """)
+        mbs_map = {
+            r["m"]: dict(r)
+            for r in (await db.execute(mbs_sql, sav_params)).mappings().all()
+        }
+    except Exception:
+        mbs_map = {}
+
+    result = []
+    cur = from_date
+    while cur <= to_d:
+        key      = cur.strftime("%Y-%m")
+        mbs      = mbs_map.get(key, {})
+        cost     = cost_map.get(key, {})
+        gen_kwh  = gen_map.get(key, 0)
+        cons_kwh = float(mbs.get("cons_kwh") or 0)
+        matched  = float(mbs.get("matched_kwh") or 0)
+        banking  = float(mbs.get("banking_kwh") or 0)
+        grid_kwh = float(mbs.get("grid_kwh") or 0)
+        lapsed   = float(mbs.get("lapsed_kwh") or 0)
+
+        # Fallback: derive lapsed via BESCOM 8% banking loss when DB value is NULL/0.
+        # Only apply when the month has real settlement data (cons_kwh > 0) to avoid
+        # inflating months before the system went live (no mbs rows → cons_kwh = 0
+        # but generation_readings may still have data, which previously caused
+        # lapsed = gen_kwh * 0.92 producing giant phantom bars for Apr–Jul).
+        if lapsed == 0 and gen_kwh > 0 and cons_kwh > 0:
+            gross_surplus = max(0.0, gen_kwh - matched)
+            if gross_surplus > 0:
+                lapsed = max(0.0, gross_surplus * 0.92 - banking)
+
+        grid_cost   = float(cost.get("grid_cost_inr") or 0)
+        savings     = float(cost.get("savings_inr") or 0)
+        savings_pct = round(savings / grid_cost * 100, 1) if grid_cost > 0 else 0
+
+        result.append({
+            "month":           key,
+            "generation_kwh":  round(gen_kwh, 2),
+            "consumption_kwh": round(cons_kwh, 2),
+            "matched_kwh":     round(matched, 2),
+            "banking_kwh":     round(banking, 2),
+            "grid_kwh":        round(grid_kwh, 2),
+            "lapsed_kwh":      round(lapsed, 2),
+            "grid_cost_inr":   round(grid_cost, 2),
+            "savings_inr":     round(savings, 2),
+            "savings_pct":     savings_pct,
+        })
+        cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+    return result
