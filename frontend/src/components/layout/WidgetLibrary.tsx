@@ -28,7 +28,7 @@ function SidebarWidgetCard({ widget, isLocked, isActive }: WidgetCardProps) {
   const sizeLabel = getSizeLabel(widget.size)
   const [dragging, setDragging] = useState(false)
 
-  const baseBg     = isActive ? 'rgba(29,191,122,.10)' : 'rgba(255,255,255,.03)'
+  const baseBg     = isActive ? 'rgba(29,191,122,.10)' : 'var(--bg-elevated)'
   const baseBorder = isActive ? 'rgba(29,191,122,.45)' : 'var(--border)'
 
   return (
@@ -58,7 +58,7 @@ function SidebarWidgetCard({ widget, isLocked, isActive }: WidgetCardProps) {
       }}
       onMouseEnter={e => {
         if (!isLocked && !dragging)
-          (e.currentTarget as HTMLElement).style.background = 'rgba(29,191,122,.06)'
+          (e.currentTarget as HTMLElement).style.background = 'rgba(29,191,122,.08)'
       }}
       onMouseLeave={e => {
         if (!dragging)
@@ -86,7 +86,7 @@ function SidebarWidgetCard({ widget, isLocked, isActive }: WidgetCardProps) {
         <span style={{
           fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4,
           color: SIZE_COLOR[sizeLabel] || 'var(--text-muted)',
-          background: 'rgba(255,255,255,.06)',
+          background: 'var(--border)',
           flexShrink: 0, marginLeft: 6,
         }}>
           {sizeLabel}
@@ -134,7 +134,7 @@ export default function WidgetLibrary({
     <aside style={{
       width: 'var(--sidebar-w)',
       minWidth: 'var(--sidebar-w)',
-      background: 'linear-gradient(180deg, #091625 0%, #070f1c 100%)',
+      background: 'var(--sidebar)',
       borderRight: '1px solid var(--border)',
       display: 'flex',
       flexDirection: 'column',
@@ -159,7 +159,7 @@ export default function WidgetLibrary({
               <button
                 onClick={() => toggle(cat)}
                 style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', padding: '5px 4px', borderRadius: 6, marginBottom: open ? 5 : 2, color: 'var(--text-sec)' }}
-                onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,.04)'}
+                onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--card)'}
                 onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'none'}
               >
                 <span style={{ fontSize: 12 }}>{categoryIcons[cat]}</span>
