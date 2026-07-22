@@ -14,6 +14,22 @@ dist/
 .env
 !.env.example
 
+# Local credential/diagnostic files — never commit
+_store_cred.bat
+push_log.txt
+check_schema*.bat
+check_schema*.bat
+check_gil_excel.py
+run_check_gil.bat
+db_investigate.py
+db_output.txt
+plants_schema.txt
+schema2.txt
+schema3.txt
+schema4.txt
+gil_structure.txt
+github_push.py
+
 # Local tooling (portable PostgreSQL + pgAdmin install, unused -- Docker
 # Compose is the primary Postgres setup for this project)
 .tools/

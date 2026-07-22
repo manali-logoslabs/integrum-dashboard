@@ -1,29 +1,18 @@
 """
 routes/c9_dashboard.py
 ======================
-All dashboard endpoints for the C9 client (BESCOM HT, Solar, Karnataka).
+All dashboard endpoints for the C9 client (BESCOM HT Solar, Karnataka).
 
-Tables used:
-  savings_summary            — cost/savings per unit per month
-  monthly_banking_settlement — settlement flow per unit per month
-  banking_account            — banking ledger per unit per month
-  generation_readings        — 15-min plant-level generation
-  consumption_readings       — 15-min per-unit consumption
-  consumption_units          — unit master (code, name, id)
-  discom_bill_v2             — view: pivoted bill line items per unit
+Data source of truth: Excel-imported tables (v3 schema)
+  c9_unit_monthly        — monthly per-unit settlement totals
+  c9_monthly_tod         — monthly TOD breakdown per unit
+  c9_slot_generation     — 15-min solar generation
+  c9_slot_consumption    — 15-min per-unit consumption
+  c9_monthly_summary     — month-level KPI summary
+  consumption_units      — unit master (code, name, tariff)
 
-Charts served:
-  Chart 1  — GET /daily-summary          Daily Gen/Cons (31-day)
-  Chart 2  — GET /unit-savings           Grid Cost vs Actual Cost per unit
-  Chart 4  — GET /tod-analysis           TOD slot breakdown + cost savings
-  Chart 5  — GET /unit-savings           (with/without banking columns)
-  Chart 6  — GET /discom-bill            DISCOM bill breakdown per unit
-  Chart 7  — GET /unit-savings           Summary table (same endpoint)
-  Chart 8  — GET /banking-loss           Banking loss per unit
-  Chart 10 — GET /wheeling-recon         Wheeling reconciliation
-  Chart 11 — GET /surplus-absorption     Energy flow / surplus absorption
-  Chart 15 — GET /heatmap                24h x 7-day generation/consumption heatmap
-             GET /savings-heatmap        All months x all units savings% grid
+All amounts in kWh (energy) or INR (cost).
+Field names are aligned with the TypeScript interfaces in frontend/src/api/client.ts.
 """
 
 from __future__ import annotations
@@ -33,31 +22,33 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import text
-from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 
 router = APIRouter(prefix="/c9", tags=["C9 Dashboard"])
 
-# Tariff rates (Rs/kWh) by consumption_unit_id
-# High-tariff units: Malleswaram (4), Sahakar Nagar (6), Old Airport Rd (7), HRBR (8)
-_TARIFF = {4: 7.20, 6: 7.20, 7: 7.20, 8: 7.20}   # others -> 5.95 (standard)
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-# BESCOM actual charge rates (from discom_bill_v2 CSV data)
-_FAC_RATE        = 0.39   # Fuel Adjustment Charge per kWh
-_PG_RATE         = 0.36   # P&G Surcharge per kWh
-_TAX_PCT         = 0.09   # Tax 9%
-_WHEELING_RATE   = 0.52   # Manual Wheeling (0.32 + 0.20) per kWh
-_CO2_FACTOR      = 0.000716  # tonne CO2 per kWh (BESCOM grid emission factor)
-_PPA_RATE        = 1.00   # Solar PPA rate Rs/kWh (C9 contract)
+TENANT_ID     = 1
+PPA_RATE      = Decimal("1.00")    # Rs/kWh — solar PPA rate (BESCOM HT)
+BANKING_RATE  = Decimal("0.08")    # 8% banking charge levied by BESCOM
 
+# BESCOM wheeling & ancillary charges (Rs/kWh) on RE units consumed
+WHEELING_RATE = Decimal("0.52")    # Rs/kWh (0.32 basic + 0.20 manual wheeling)
+FAC_RATE      = Decimal("0.39")    # Fuel Adjustment Charge
+PG_RATE       = Decimal("0.36")    # P&G surcharge
+TAX_PCT       = Decimal("0.09")    # 9% electricity tax on bill
+
+# CO2 emission factor (BESCOM grid average)
+CO2_FACTOR    = Decimal("0.000716")  # tonne CO2/kWh
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _to_py(v: Any) -> Any:
     if v is None:
         return None
-    if isinstance(v, (int, float)):
-        return v
     if isinstance(v, Decimal):
         return round(float(v), 4)
     return v
@@ -67,185 +58,212 @@ def _row(r: Any) -> dict:
     return {k: _to_py(v) for k, v in dict(r).items()}
 
 
-def _month_range(month: str) -> tuple[date, date]:
-    try:
-        d = date.fromisoformat(f"{month}-01")
-    except ValueError:
-        raise HTTPException(400, f"Invalid month '{month}'. Use YYYY-MM.")
-    next_month = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return d, next_month - timedelta(days=1)
-
-
-def _month_str(month: str) -> date:
+def _month_date(month: str) -> date:
     try:
         return date.fromisoformat(f"{month}-01")
     except ValueError:
         raise HTTPException(400, f"Invalid month '{month}'. Use YYYY-MM.")
 
 
+def _month_range(month: str) -> tuple[date, date]:
+    d = _month_date(month)
+    next_m = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return d, next_m - timedelta(days=1)
+
+
 def _parse_unit_ids(unit_ids: str) -> list[int]:
-    """Parse comma-separated unit ID string into list of ints."""
     if not unit_ids:
         return []
     return [int(x) for x in unit_ids.split(",") if x.strip().isdigit()]
 
 
 def _uid_clause(uid_list: list[int], alias: str = "cu") -> tuple[str, dict]:
-    """Return (SQL fragment, params dict) for optional unit_id filter."""
     if uid_list:
-        return f"AND {alias}.id = ANY(:unit_ids)", {"unit_ids": uid_list}
+        return f"AND {alias}.unit_id = ANY(:unit_ids)", {"unit_ids": uid_list}
     return "", {}
 
 
-# ---------------------------------------------------------------------------
-# KPI Summary (header cards)
-# ---------------------------------------------------------------------------
+# ── Units master ──────────────────────────────────────────────────────────────
+
+@router.get("/units")
+async def list_units(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """Return all C9 consumption units (excludes Slot_Surplus virtual unit)."""
+    sql = text("""
+        SELECT
+            unit_id,
+            unit_code  AS code,
+            unit_name  AS name,
+            tariff_group,
+            tariff_rate
+        FROM   consumption_units
+        WHERE  tenant_id = :tid
+          AND  unit_code <> 'SLOT_SURPLUS'
+          AND  is_active = TRUE
+        ORDER BY tariff_group, unit_name
+    """)
+    rows = (await db.execute(sql, {"tid": TENANT_ID})).mappings().all()
+    return [_row(r) for r in rows]
+
+
+# ── KPI Summary (header cards) ────────────────────────────────────────────────
 
 @router.get("/kpi-summary")
 async def kpi_summary(
-    month: str = Query("2025-08", description="Month in YYYY-MM format"),
-    unit_ids: str = Query("", description="Comma-separated unit IDs (empty = all)"),
+    month:    str = Query("2025-08"),
+    unit_ids: str = Query(""),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Top-level KPI cards for the selected month."""
-    month_date = _month_str(month)
-    uid_list = _parse_unit_ids(unit_ids)
+    """Top-level KPI cards for the selected month from c9_unit_monthly + c9_monthly_summary."""
+    month_date = _month_date(month)
+    uid_list   = _parse_unit_ids(unit_ids)
     uid_sql, uid_params = _uid_clause(uid_list)
 
-    sql = text(f"""
+    # Settlement aggregates (exclude virtual Slot_Surplus)
+    agg_sql = text(f"""
         SELECT
-            COALESCE(SUM(ss.total_consumption_kwh), 0)  AS total_consumption_kwh,
-            COALESCE(SUM(ss.total_matched_kwh), 0)      AS total_matched_kwh,
-            COALESCE(SUM(ss.grid_cost_without_re), 0)   AS total_grid_cost_inr,
-            COALESCE(SUM(ss.cost_with_banking), 0)      AS total_actual_cost_inr,
-            COALESCE(SUM(ss.savings_with_banking), 0)   AS total_savings_inr,
-            COALESCE(AVG(ss.replacement_pct), 0)        AS avg_replacement_pct
-        FROM savings_summary ss
-        JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
-        WHERE ss.tenant_id = 1
-          AND ss.month = :month
+            COALESCE(SUM(um.consumption_kwh),    0) AS total_consumption_kwh,
+            COALESCE(SUM(um.matched_settlement),  0) AS total_matched_kwh,
+            COALESCE(SUM(um.matched_settlement_2),0) AS total_banked_kwh,
+            COALESCE(SUM(um.grid_consumption),    0) AS total_grid_kwh,
+            COALESCE(SUM(um.lapse_units),         0) AS total_lapse_kwh
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month     = :m
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
           {uid_sql}
     """)
-    params = {"month": month_date, **uid_params}
-    row = (await db.execute(sql, params)).mappings().first()
+    agg = (await db.execute(agg_sql, {"tid": TENANT_ID, "m": month_date, **uid_params})).mappings().first()
 
-    start, end = _month_range(month)
-    gen_sql = text("""
-        SELECT COALESCE(SUM(generation_kwh), 0) AS total_gen
-        FROM generation_readings
-        WHERE tenant_id = 1
-          AND slot_start_time::DATE BETWEEN :start AND :end
+    # Monthly generation total
+    sum_sql = text("""
+        SELECT total_generation_kwh, net_banked_kwh
+        FROM   c9_monthly_summary
+        WHERE  tenant_id = :tid AND month = :m
+        LIMIT 1
     """)
-    gen_row = (await db.execute(gen_sql, {"start": start, "end": end})).mappings().first()
+    sumr = (await db.execute(sum_sql, {"tid": TENANT_ID, "m": month_date})).mappings().first()
 
-    # Banking total from banking_account
-    try:
-        bank_sql = text(f"""
-            SELECT COALESCE(SUM(ba.gross_banked_kwh), 0) AS total_banking_kwh
-            FROM banking_account ba
-            JOIN consumption_units cu ON cu.id = ba.consumption_unit_id
-            WHERE ba.tenant_id = 1
-              AND ba.month = :month
-              {uid_sql}
-        """)
-        bank_row = (await db.execute(bank_sql, params)).mappings().first()
-        total_banking = float(bank_row["total_banking_kwh"] or 0)
-    except ProgrammingError:
-        total_banking = 0
+    total_gen    = float(sumr["total_generation_kwh"] if sumr else 0) or 0
+    total_cons   = float(agg["total_consumption_kwh"]  or 0)
+    total_match  = float(agg["total_matched_kwh"]      or 0)
+    total_banked = float(agg["total_banked_kwh"]       or 0)
+    total_grid   = float(agg["total_grid_kwh"]         or 0)
+    total_lapse  = float(agg["total_lapse_kwh"]        or 0)
 
-    total_grid   = float(row["total_grid_cost_inr"] or 0)
-    total_actual = float(row["total_actual_cost_inr"] or 0)
-    total_match  = float(row["total_matched_kwh"] or 0)
-    total_cons   = float(row["total_consumption_kwh"] or 0)
-    total_gen    = float(gen_row["total_gen"] or 0)
+    # Cost breakdown per tariff group
+    cost_sql = text(f"""
+        SELECT
+            COALESCE(SUM(um.consumption_kwh * cu.tariff_rate), 0)                      AS grid_cost,
+            COALESCE(SUM(um.matched_settlement * :ppa), 0)                             AS matched_ppa,
+            COALESCE(SUM(um.matched_settlement_2 * :ppa), 0)                           AS banked_ppa,
+            COALESCE(SUM((um.matched_settlement + um.matched_settlement_2) * :whl), 0) AS wheeling_cost,
+            COALESCE(SUM(um.grid_consumption * cu.tariff_rate), 0)                     AS grid_drawl_cost
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month     = :m
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
+          {uid_sql}
+    """)
+    cost = (await db.execute(cost_sql, {
+        "tid": TENANT_ID, "m": month_date,
+        "ppa": float(PPA_RATE), "whl": float(WHEELING_RATE),
+        **uid_params
+    })).mappings().first()
 
-    replacement_pct = round(total_match / total_cons * 100, 1) if total_cons > 0 else 0
-    savings_pct     = round((total_grid - total_actual) / total_grid * 100, 1) if total_grid > 0 else 0
-    co2_saved       = round(total_match * _CO2_FACTOR, 2)
+    grid_cost    = float(cost["grid_cost"]       or 0)
+    actual_cost  = (float(cost["matched_ppa"]     or 0)
+                  + float(cost["banked_ppa"]      or 0)
+                  + float(cost["wheeling_cost"]   or 0)
+                  + float(cost["grid_drawl_cost"] or 0))
+    savings      = max(0, grid_cost - actual_cost)
+    savings_pct  = round(savings / grid_cost * 100, 1) if grid_cost > 0 else 0
+    repl_pct     = round((total_match + total_banked) / total_cons * 100, 1) if total_cons > 0 else 0
+    co2_saved    = round((total_match + total_banked) * float(CO2_FACTOR), 2)
 
     return {
-        "month":                 month,
-        "total_generation_kwh":  round(total_gen, 0),
-        "total_consumption_kwh": round(total_cons, 0),
-        "total_matched_kwh":     round(total_match, 0),
-        "total_banking_kwh":     round(total_banking, 0),
-        "total_grid_cost_inr":   round(total_grid, 0),
-        "total_actual_cost_inr": round(total_actual, 0),
-        "total_savings_inr":     round(float(row["total_savings_inr"] or 0), 0),
-        "savings_pct":           savings_pct,
-        "replacement_pct":       replacement_pct,
-        "co2_saved_tonnes":      co2_saved,
+        "month":                  month,
+        "total_generation_kwh":   round(total_gen,    0),
+        "total_consumption_kwh":  round(total_cons,   0),
+        "total_matched_kwh":      round(total_match,  0),
+        "total_banking_kwh":      round(total_banked, 0),
+        "total_grid_kwh":         round(total_grid,   0),
+        "total_lapse_kwh":        round(total_lapse,  0),
+        "total_grid_cost_inr":    round(grid_cost,    0),
+        "total_actual_cost_inr":  round(actual_cost,  0),
+        "total_savings_inr":      round(savings,      0),
+        "savings_pct":            savings_pct,
+        "replacement_pct":        repl_pct,
+        "co2_saved_tonnes":       co2_saved,
     }
 
 
-# ---------------------------------------------------------------------------
-# Chart 1 — Daily Generation & Consumption
-# ---------------------------------------------------------------------------
+# ── Chart 1 — Daily Generation & Consumption ──────────────────────────────────
 
 @router.get("/daily-summary")
 async def daily_summary(
     month: str = Query("2025-08"),
-    db: AsyncSession = Depends(get_db),
+    db:    AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    """Daily totals for the month across all units."""
+    """Daily totals for the month — from 15-min slot tables."""
     start, end = _month_range(month)
-    month_date = _month_str(month)
 
     gen_sql = text("""
         SELECT
-            (slot_start_time AT TIME ZONE 'Asia/Kolkata')::DATE AS day,
-            SUM(generation_kwh) AS gen_kwh
-        FROM generation_readings
-        WHERE tenant_id = 1
-          AND slot_start_time::DATE BETWEEN :start AND :end
-        GROUP BY day ORDER BY day
+            (slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE AS day,
+            SUM(generation_kwh)                         AS gen_kwh
+        FROM   c9_slot_generation
+        WHERE  tenant_id = :tid
+          AND  (slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE BETWEEN :start AND :end
+        GROUP BY day
+        ORDER BY day
     """)
-    gen_rows = {
+    gen_map = {
         str(r["day"]): float(r["gen_kwh"] or 0)
-        for r in (await db.execute(gen_sql, {"start": start, "end": end})).mappings().all()
+        for r in (await db.execute(gen_sql, {"tid": TENANT_ID, "start": start, "end": end})).mappings().all()
     }
 
     cons_sql = text("""
         SELECT
-            (slot_start_time AT TIME ZONE 'Asia/Kolkata')::DATE AS day,
-            SUM(consumption_kwh) AS cons_kwh
-        FROM consumption_readings
-        WHERE tenant_id = 1
-          AND slot_start_time::DATE BETWEEN :start AND :end
-        GROUP BY day ORDER BY day
+            (slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE AS day,
+            SUM(consumption_kwh)                        AS cons_kwh
+        FROM   c9_slot_consumption
+        WHERE  tenant_id = :tid
+          AND  (slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE BETWEEN :start AND :end
+        GROUP BY day
+        ORDER BY day
     """)
-    cons_rows = {
+    cons_map = {
         str(r["day"]): float(r["cons_kwh"] or 0)
-        for r in (await db.execute(cons_sql, {"start": start, "end": end})).mappings().all()
+        for r in (await db.execute(cons_sql, {"tid": TENANT_ID, "start": start, "end": end})).mappings().all()
     }
 
-    try:
-        monthly_sql = text("""
-            SELECT
-                COALESCE(SUM(total_matched_kwh), 0)    AS total_matched,
-                COALESCE(SUM(banking_utilised_kwh), 0) AS total_banking
-            FROM monthly_banking_settlement
-            WHERE tenant_id = 1
-              AND month = :month
-              AND tod_slot_id IS NULL
-        """)
-        mrow = (await db.execute(monthly_sql, {"month": month_date})).mappings().first()
-        total_matched = float(mrow["total_matched"] or 0) if mrow else 0
-        total_banking = float(mrow["total_banking"] or 0) if mrow else 0
-    except ProgrammingError:
-        total_matched = 0
-        total_banking = 0
+    # Monthly settlement totals for pro-rating to daily
+    month_date = _month_date(month)
+    agg_sql = text("""
+        SELECT
+            COALESCE(SUM(matched_settlement),   0) AS total_matched,
+            COALESCE(SUM(matched_settlement_2), 0) AS total_banking,
+            COALESCE(SUM(lapse_units),          0) AS total_lapsed
+        FROM   c9_unit_monthly
+        WHERE  tenant_id = :tid AND month = :m
+    """)
+    agg = (await db.execute(agg_sql, {"tid": TENANT_ID, "m": month_date})).mappings().first()
+    total_matched = float(agg["total_matched"]  or 0)
+    total_banking = float(agg["total_banking"]  or 0)
+    total_lapsed  = float(agg["total_lapsed"]   or 0)
+    total_gen_kwh = sum(gen_map.values()) or 1
 
-    total_gen = sum(gen_rows.values()) or 1
-    all_days  = sorted(set(gen_rows.keys()) | set(cons_rows.keys()))
-    result    = []
-    for day in all_days:
-        gen  = gen_rows.get(day, 0)
-        cons = cons_rows.get(day, 0)
-        share   = gen / total_gen
+    result = []
+    for day in sorted(set(gen_map) | set(cons_map)):
+        gen  = gen_map.get(day, 0)
+        cons = cons_map.get(day, 0)
+        share   = gen / total_gen_kwh
         matched = round(min(total_matched * share, cons), 2)
         banking = round(min(total_banking * share, max(0, cons - matched)), 2)
         grid    = round(max(0, cons - matched - banking), 2)
+        lapsed  = round(total_lapsed * share, 2)
         result.append({
             "date":            day,
             "generation_kwh":  round(gen,  2),
@@ -253,691 +271,651 @@ async def daily_summary(
             "matched_kwh":     matched,
             "banking_kwh":     banking,
             "grid_kwh":        grid,
+            "lapsed_kwh":      lapsed,
         })
     return result
 
 
-# ---------------------------------------------------------------------------
-# Charts 2, 5, 7 — Unit-wise savings / cost analysis
-# ---------------------------------------------------------------------------
-
-@router.get("/unit-savings")
-async def unit_savings(
-    month: str = Query("2025-08"),
-    unit_ids: str = Query("", description="Comma-separated unit IDs (empty = all)"),
-    db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """Per-unit cost breakdown for the selected month from savings_summary."""
-    month_date = _month_str(month)
-    uid_list = _parse_unit_ids(unit_ids)
-    uid_sql, uid_params = _uid_clause(uid_list)
-
-    try:
-        sql = text(f"""
-            SELECT
-                cu.name                                                     AS unit,
-                cu.code                                                     AS unit_code,
-                cu.id                                                       AS unit_id,
-                ss.grid_cost_without_re                                     AS grid_cost,
-                ss.cost_with_banking                                        AS actual_cost_with_banking,
-                ss.cost_without_banking                                     AS actual_cost_without_banking,
-                ss.savings_with_banking,
-                ss.savings_without_banking,
-                ROUND(ss.savings_with_banking
-                      / NULLIF(ss.grid_cost_without_re, 0) * 100, 1)       AS savings_pct_with_banking,
-                ROUND(ss.savings_without_banking
-                      / NULLIF(ss.grid_cost_without_re, 0) * 100, 1)       AS savings_pct_without_banking,
-                ss.total_consumption_kwh                                    AS consumption_kwh,
-                ss.total_matched_kwh                                        AS matched_kwh,
-                ss.replacement_pct,
-                mbs.banking_utilised_kwh                                    AS banking_kwh,
-                mbs.surplus_before_banking_kwh                              AS surplus_kwh,
-                GREATEST(ss.total_consumption_kwh - ss.total_matched_kwh, 0) AS grid_drawl_kwh
-            FROM savings_summary ss
-            JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
-            LEFT JOIN monthly_banking_settlement mbs
-                   ON mbs.consumption_unit_id = ss.consumption_unit_id
-                  AND mbs.month = ss.month
-                  AND mbs.tenant_id = ss.tenant_id
-                  AND mbs.tod_slot_id IS NULL
-            WHERE ss.tenant_id = 1
-              AND ss.month = :month
-              {uid_sql}
-            ORDER BY cu.name
-        """)
-        params = {"month": month_date, **uid_params}
-        rows = (await db.execute(sql, params)).mappings().all()
-    except ProgrammingError:
-        sql = text(f"""
-            SELECT
-                cu.name                                                     AS unit,
-                cu.code                                                     AS unit_code,
-                cu.id                                                       AS unit_id,
-                ss.grid_cost_without_re                                     AS grid_cost,
-                ss.cost_with_banking                                        AS actual_cost_with_banking,
-                ss.cost_without_banking                                     AS actual_cost_without_banking,
-                ss.savings_with_banking,
-                ss.savings_without_banking,
-                ROUND(ss.savings_with_banking
-                      / NULLIF(ss.grid_cost_without_re, 0) * 100, 1)       AS savings_pct_with_banking,
-                ROUND(ss.savings_without_banking
-                      / NULLIF(ss.grid_cost_without_re, 0) * 100, 1)       AS savings_pct_without_banking,
-                ss.total_consumption_kwh                                    AS consumption_kwh,
-                ss.total_matched_kwh                                        AS matched_kwh,
-                ss.replacement_pct,
-                0::NUMERIC AS banking_kwh,
-                0::NUMERIC AS surplus_kwh,
-                GREATEST(ss.total_consumption_kwh - ss.total_matched_kwh, 0) AS grid_drawl_kwh
-            FROM savings_summary ss
-            JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
-            WHERE ss.tenant_id = 1
-              AND ss.month = :month
-              {uid_sql}
-            ORDER BY cu.name
-        """)
-        params = {"month": month_date, **uid_params}
-        rows = (await db.execute(sql, params)).mappings().all()
-
-    return [_row(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Chart 4 — TOD Analysis
-# ---------------------------------------------------------------------------
-
-@router.get("/tod-analysis")
-async def tod_analysis(
-    month: str = Query("2025-08"),
-    unit_ids: str = Query("", description="Comma-separated unit IDs (empty = all)"),
-    db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """TOD slot breakdown: gen, cons, and estimated cost savings per slot."""
-    start, end = _month_range(month)
-    uid_list = _parse_unit_ids(unit_ids)
-    uid_sql_cons, uid_params = _uid_clause(uid_list, alias="cr")
-
-    # Add consumption unit filter only to consumption_readings (which has unit_id)
-    cons_sql = text(f"""
-        SELECT
-            CASE
-                WHEN EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata') BETWEEN 6 AND 8   THEN 'MORNING_PEAK'
-                WHEN EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata') BETWEEN 9 AND 17  THEN 'DAY_NORMAL'
-                WHEN EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata') BETWEEN 18 AND 21 THEN 'EVENING_PEAK'
-                ELSE 'NIGHT_OFF_PEAK'
-            END AS tod_slot,
-            SUM(consumption_kwh) AS consumption_kwh
-        FROM consumption_readings cr
-        WHERE cr.tenant_id = 1
-          AND cr.slot_start_time::DATE BETWEEN :start AND :end
-          {uid_sql_cons.replace('cu.id', 'cr.consumption_unit_id')}
-        GROUP BY tod_slot
-    """)
-    cons_params = {"start": start, "end": end, **uid_params}
-    cons_map = {
-        r["tod_slot"]: float(r["consumption_kwh"] or 0)
-        for r in (await db.execute(cons_sql, cons_params)).mappings().all()
-    }
-
-    gen_sql = text("""
-        SELECT
-            CASE
-                WHEN EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata') BETWEEN 6 AND 8   THEN 'MORNING_PEAK'
-                WHEN EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata') BETWEEN 9 AND 17  THEN 'DAY_NORMAL'
-                WHEN EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata') BETWEEN 18 AND 21 THEN 'EVENING_PEAK'
-                ELSE 'NIGHT_OFF_PEAK'
-            END AS tod_slot,
-            SUM(generation_kwh) AS generation_kwh
-        FROM generation_readings
-        WHERE tenant_id = 1
-          AND slot_start_time::DATE BETWEEN :start AND :end
-        GROUP BY tod_slot
-    """)
-    gen_map = {
-        r["tod_slot"]: float(r["generation_kwh"] or 0)
-        for r in (await db.execute(gen_sql, {"start": start, "end": end})).mappings().all()
-    }
-
-    # Average tariff rate across all units (mix of 7.20 and 5.95)
-    avg_rate = 6.40  # Weighted average for BESCOM C9 portfolio
-
-    SLOTS = [
-        ("MORNING_PEAK",   "Morning Peak (06-09h)",   1.50),
-        ("DAY_NORMAL",     "Day Normal (09-18h)",      1.00),
-        ("EVENING_PEAK",   "Evening Peak (18-22h)",    1.50),
-        ("NIGHT_OFF_PEAK", "Night Off-Peak (22-06h)",  0.75),
-    ]
-    result = []
-    for code, label, mult in SLOTS:
-        gen_kwh  = round(gen_map.get(code,  0), 2)
-        cons_kwh = round(cons_map.get(code, 0), 2)
-        # Direct match estimate = min(gen, cons); savings = matched * (tariff - PPA)
-        direct_matched = round(min(gen_kwh, cons_kwh), 2)
-        cost_savings   = round(direct_matched * (avg_rate - _PPA_RATE), 2)
-        result.append({
-            "tod_slot":         code,
-            "slot_label":       label,
-            "multiplier":       mult,
-            "generation_kwh":   gen_kwh,
-            "consumption_kwh":  cons_kwh,
-            "direct_matched_kwh": direct_matched,
-            "cost_savings_inr": cost_savings,
-        })
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Chart 6 — DISCOM Bill Breakdown
-# ---------------------------------------------------------------------------
-
-@router.get("/discom-bill")
-async def discom_bill(
-    month: str = Query("2025-08"),
-    unit_ids: str = Query("", description="Comma-separated unit IDs (empty = all)"),
-    db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """
-    DISCOM bill line items per unit.
-    Tries discom_bill_v2 view for actual line items; falls back to
-    BESCOM-rate estimates (corrected from CSV data) if view unavailable.
-    Actual BESCOM rates: FAC Rs0.39/kWh, Tax 9%, P&G Rs0.36/kWh,
-    Wheeling Rs0.32+0.20=0.52/kWh.
-    """
-    month_date = _month_str(month)
-    uid_list = _parse_unit_ids(unit_ids)
-    uid_sql, uid_params = _uid_clause(uid_list)
-
-    try:
-        # Try joining with discom_bill_v2 view for actual line items
-        sql = text(f"""
-            SELECT
-                cu.name                                                     AS unit_name,
-                cu.code                                                     AS unit_code,
-                cu.id                                                       AS unit_id,
-                ss.grid_cost_without_re                                     AS gross_amount_inr,
-                ss.cost_with_banking                                        AS net_payable_inr,
-                ss.savings_with_banking                                     AS savings_inr,
-                ss.total_consumption_kwh                                    AS total_units_kwh,
-                ss.total_matched_kwh                                        AS wheeling_energy_kwh,
-                CASE WHEN cu.id IN (4, 6, 7, 8) THEN 7.20 ELSE 5.95 END   AS energy_rate_per_kwh,
-                dbv.demand_charge                                            AS demand_charge_inr,
-                dbv.fac_charge                                               AS fac_inr,
-                dbv.tax                                                      AS tax_inr,
-                dbv.pg_surcharge                                             AS pg_surcharge_inr,
-                COALESCE(dbv.wheeling_energy_charge, 0)
-                  + COALESCE(dbv.manual_wheeling_charge, 0)                 AS wheeling_charge_inr
-            FROM savings_summary ss
-            JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
-            LEFT JOIN discom_bill_v2 dbv
-                   ON dbv.unit_id = cu.id AND dbv.month = ss.month
-            WHERE ss.tenant_id = 1
-              AND ss.month = :month
-              {uid_sql}
-            ORDER BY cu.name
-        """)
-        params = {"month": month_date, **uid_params}
-        rows = (await db.execute(sql, params)).mappings().all()
-        use_view = True
-    except ProgrammingError:
-        # discom_bill_v2 view not yet created — use savings_summary only
-        sql = text(f"""
-            SELECT
-                cu.name                                                     AS unit_name,
-                cu.code                                                     AS unit_code,
-                cu.id                                                       AS unit_id,
-                ss.grid_cost_without_re                                     AS gross_amount_inr,
-                ss.cost_with_banking                                        AS net_payable_inr,
-                ss.savings_with_banking                                     AS savings_inr,
-                ss.total_consumption_kwh                                    AS total_units_kwh,
-                ss.total_matched_kwh                                        AS wheeling_energy_kwh,
-                CASE WHEN cu.id IN (4, 6, 7, 8) THEN 7.20 ELSE 5.95 END   AS energy_rate_per_kwh,
-                NULL::NUMERIC AS demand_charge_inr,
-                NULL::NUMERIC AS fac_inr,
-                NULL::NUMERIC AS tax_inr,
-                NULL::NUMERIC AS pg_surcharge_inr,
-                NULL::NUMERIC AS wheeling_charge_inr
-            FROM savings_summary ss
-            JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
-            WHERE ss.tenant_id = 1
-              AND ss.month = :month
-              {uid_sql}
-            ORDER BY cu.name
-        """)
-        params = {"month": month_date, **uid_params}
-        rows = (await db.execute(sql, params)).mappings().all()
-        use_view = False
-
-    result = []
-    for r in rows:
-        d = dict(r)
-        gross        = float(d["gross_amount_inr"] or 0)
-        kwh          = float(d["total_units_kwh"] or 0)
-        rate         = float(d["energy_rate_per_kwh"])
-        wheeling_kwh = float(d["wheeling_energy_kwh"] or 0)
-
-        # Use actual view data if populated; otherwise use corrected BESCOM rate estimates
-        energy_charge  = round(kwh * rate, 2)
-        demand_charge  = float(d["demand_charge_inr"] or 0) or round(gross * 0.12, 2)
-        fac            = float(d["fac_inr"]  or 0) or round(kwh * _FAC_RATE, 2)
-        tax            = float(d["tax_inr"]  or 0) or round(gross * _TAX_PCT, 2)
-        pg_surcharge   = float(d["pg_surcharge_inr"] or 0) or round(kwh * _PG_RATE, 2)
-        wheeling       = float(d["wheeling_charge_inr"] or 0) or round(wheeling_kwh * _WHEELING_RATE, 2)
-
-        result.append({
-            "unit_name":           d["unit_name"],
-            "unit_code":           d["unit_code"],
-            "gross_amount_inr":    round(gross, 2),
-            "net_payable_inr":     round(float(d["net_payable_inr"] or 0), 2),
-            "savings_inr":         round(float(d["savings_inr"] or 0), 2),
-            "total_units_kwh":     round(kwh, 2),
-            "energy_rate_per_kwh": rate,
-            "energy_charge_inr":   energy_charge,
-            "demand_charge_inr":   demand_charge,
-            "fac_inr":             fac,
-            "tax_inr":             tax,
-            "pg_surcharge_inr":    pg_surcharge,
-            "wheeling_charge_inr": wheeling,
-            "wheeling_energy_kwh": round(wheeling_kwh, 2),
-            "data_source":         "actual_bill" if use_view and float(d.get("demand_charge_inr") or 0) > 0 else "estimated",
-        })
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Chart 8 — Banking Loss per Unit
-# ---------------------------------------------------------------------------
-
-@router.get("/banking-loss")
-async def banking_loss(
-    month: str = Query("2025-08"),
-    unit_ids: str = Query("", description="Comma-separated unit IDs (empty = all)"),
-    db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """Per-unit banking loss breakdown from banking_account."""
-    month_date = _month_str(month)
-    uid_list = _parse_unit_ids(unit_ids)
-    uid_sql, uid_params = _uid_clause(uid_list)
-
-    sql = text(f"""
-        SELECT
-            cu.name                                                             AS unit,
-            cu.code                                                             AS unit_code,
-            ba.gross_banked_kwh,
-            ROUND(ba.gross_banked_kwh * ba.banking_loss_pct / 100, 2)          AS banking_loss_kwh,
-            ROUND(ba.gross_banked_kwh * (1 - ba.banking_loss_pct / 100), 2)    AS net_banked_kwh,
-            ba.intra_settled_kwh + ba.inter_settled_kwh                         AS settled_kwh,
-            ba.lapsed_kwh                                                        AS expired_kwh,
-            ba.closing_balance_kwh,
-            ROUND(ba.gross_banked_kwh * ba.banking_loss_pct / 100
-                  * CASE WHEN cu.id IN (4,6,7,8) THEN 7.20 ELSE 5.95 END, 2)  AS loss_inr
-        FROM banking_account ba
-        JOIN consumption_units cu ON cu.id = ba.consumption_unit_id
-        WHERE ba.tenant_id = 1
-          AND ba.month = :month
-          {uid_sql}
-        ORDER BY cu.name
-    """)
-    params = {"month": month_date, **uid_params}
-    rows = (await db.execute(sql, params)).mappings().all()
-    return [_row(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Chart 10 — Wheeling Reconciliation
-# ---------------------------------------------------------------------------
-
-@router.get("/wheeling-recon")
-async def wheeling_recon(
-    month: str = Query("2025-08"),
-    unit_ids: str = Query("", description="Comma-separated unit IDs (empty = all)"),
-    db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """Proposed vs actual wheeled units; coverage gap per unit."""
-    month_date = _month_str(month)
-    uid_list = _parse_unit_ids(unit_ids)
-    uid_sql, uid_params = _uid_clause(uid_list)
-
-    try:
-        sql = text(f"""
-            SELECT
-                cu.name                                                             AS unit,
-                cu.code                                                             AS unit_code,
-                mbs.total_matched_kwh                                               AS proposed_kwh,
-                mbs.direct_matched_kwh                                              AS direct_match_kwh,
-                mbs.banking_utilised_kwh                                            AS banking_settled_kwh,
-                mbs.total_consumption_kwh                                           AS consumption_kwh,
-                mbs.unmet_demand_kwh                                                AS gap_kwh,
-                ROUND(mbs.unmet_demand_kwh
-                      * CASE WHEN cu.id IN (4,6,7,8) THEN 7.20 ELSE 5.95 END, 2)  AS gap_inr,
-                CASE
-                    WHEN mbs.total_matched_kwh >= mbs.total_consumption_kwh THEN 'FULL_COVER'
-                    WHEN mbs.direct_matched_kwh > 0                          THEN 'PARTIAL'
-                    ELSE 'GRID_ONLY'
-                END AS status
-            FROM monthly_banking_settlement mbs
-            JOIN consumption_units cu ON cu.id = mbs.consumption_unit_id
-            WHERE mbs.tenant_id = 1
-              AND mbs.month = :month
-              AND mbs.tod_slot_id IS NULL
-              {uid_sql}
-            ORDER BY cu.name
-        """)
-        params = {"month": month_date, **uid_params}
-        rows = (await db.execute(sql, params)).mappings().all()
-    except ProgrammingError:
-        rows = []
-    return [_row(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Chart 11 — Surplus & Absorption Flow
-# ---------------------------------------------------------------------------
-
-@router.get("/surplus-absorption")
-async def surplus_absorption(
-    month: str = Query("2025-08"),
-    unit_ids: str = Query("", description="Comma-separated unit IDs (empty = all)"),
-    db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """
-    Complete energy flow per unit:
-    Generation -> Direct Match + Surplus -> Banked + Lapsed -> Banking Settled.
-
-    Note: surplus_lapsed_kwh = banking credits that expired unused at month end.
-          closing_balance_kwh = cumulative unused banking carry-forward to next month.
-    """
-    month_date = _month_str(month)
-    uid_list = _parse_unit_ids(unit_ids)
-    uid_sql, uid_params = _uid_clause(uid_list)
-
-    try:
-        sql = text(f"""
-            SELECT
-                cu.name                                AS unit,
-                cu.code                                AS unit_code,
-                mbs.net_generation_kwh                 AS generation_kwh,
-                mbs.total_consumption_kwh              AS consumption_kwh,
-                mbs.direct_matched_kwh,
-                mbs.surplus_before_banking_kwh         AS gross_surplus_kwh,
-                mbs.banking_utilised_kwh               AS banking_settled_kwh,
-                mbs.surplus_lapsed_kwh                 AS banking_expired_kwh,
-                mbs.unmet_demand_kwh                   AS grid_drawl_kwh,
-                mbs.total_matched_kwh,
-                ss.replacement_pct,
-                ba.closing_balance_kwh
-            FROM monthly_banking_settlement mbs
-            JOIN consumption_units cu ON cu.id = mbs.consumption_unit_id
-            LEFT JOIN savings_summary ss
-                   ON ss.consumption_unit_id = mbs.consumption_unit_id
-                  AND ss.month = mbs.month
-                  AND ss.tenant_id = mbs.tenant_id
-            LEFT JOIN banking_account ba
-                   ON ba.consumption_unit_id = mbs.consumption_unit_id
-                  AND ba.month = mbs.month
-                  AND ba.tenant_id = mbs.tenant_id
-            WHERE mbs.tenant_id = 1
-              AND mbs.month = :month
-              AND mbs.tod_slot_id IS NULL
-              {uid_sql}
-            ORDER BY cu.name
-        """)
-        params = {"month": month_date, **uid_params}
-        rows = (await db.execute(sql, params)).mappings().all()
-    except ProgrammingError:
-        rows = []
-    return [_row(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Chart 15 — 24h x 7-day Heatmap
-# ---------------------------------------------------------------------------
-
-@router.get("/heatmap")
-async def heatmap(
-    month: str = Query("2025-08"),
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Average gen/cons per hour-of-day x day-of-week (IST). Returns 24x7 matrices."""
-    start, end = _month_range(month)
-
-    cons_sql = text("""
-        SELECT
-            EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata')::INT AS hr,
-            ((EXTRACT(DOW FROM slot_start_time AT TIME ZONE 'Asia/Kolkata')::INT + 6) % 7) AS dow,
-            AVG(consumption_kwh) AS avg_cons
-        FROM consumption_readings
-        WHERE tenant_id = 1
-          AND slot_start_time::DATE BETWEEN :start AND :end
-        GROUP BY hr, dow
-    """)
-    cons_rows = (await db.execute(cons_sql, {"start": start, "end": end})).mappings().all()
-
-    gen_sql = text("""
-        SELECT
-            EXTRACT(HOUR FROM slot_start_time AT TIME ZONE 'Asia/Kolkata')::INT AS hr,
-            ((EXTRACT(DOW FROM slot_start_time AT TIME ZONE 'Asia/Kolkata')::INT + 6) % 7) AS dow,
-            AVG(generation_kwh) AS avg_gen
-        FROM generation_readings
-        WHERE tenant_id = 1
-          AND slot_start_time::DATE BETWEEN :start AND :end
-        GROUP BY hr, dow
-    """)
-    gen_rows = (await db.execute(gen_sql, {"start": start, "end": end})).mappings().all()
-
-    cons_map = {(int(r["hr"]), int(r["dow"])): float(r["avg_cons"] or 0) for r in cons_rows}
-    gen_map  = {(int(r["hr"]), int(r["dow"])): float(r["avg_gen"]  or 0) for r in gen_rows}
-
-    net_matrix:  list = []
-    gen_matrix:  list = []
-    cons_matrix: list = []
-    for h in range(24):
-        net_row, gen_row, cons_row = [], [], []
-        for d in range(7):
-            g = gen_map.get((h, d))
-            c = cons_map.get((h, d))
-            if g is None and c is None:
-                net_row.append(None); gen_row.append(None); cons_row.append(None)
-            else:
-                g = g or 0; c = c or 0
-                gen_row.append(round(g, 1))
-                cons_row.append(round(c, 1))
-                net_row.append(round(g - c, 1))
-        net_matrix.append(net_row)
-        gen_matrix.append(gen_row)
-        cons_matrix.append(cons_row)
-
-    return {
-        "hours":        list(range(24)),
-        "days":         ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        "net_matrix":   net_matrix,
-        "gen_matrix":   gen_matrix,
-        "cons_matrix":  cons_matrix,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Savings Heatmap — All months x all units (Chart 3 dedicated endpoint)
-# ---------------------------------------------------------------------------
-
-@router.get("/savings-heatmap")
-async def savings_heatmap(
-    db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """
-    Returns savings% for every unit x every available month.
-    Powers Chart 3 (Monthly Savings Heatmap) with a single API call
-    instead of N parallel /unit-savings calls.
-    """
-    try:
-        # Try monthly_savings_v2 view first (schema_v2)
-        sql = text("""
-            SELECT
-                cu.name                                                             AS unit,
-                cu.code                                                             AS unit_code,
-                TO_CHAR(msv.month, 'YYYY-MM')                                      AS month,
-                msv.savings_pct_with_banking                                        AS savings_pct,
-                msv.savings_with_banking                                            AS savings_inr,
-                msv.grid_cost                                                       AS grid_cost_inr,
-                msv.consumption                                                     AS consumption_kwh
-            FROM monthly_savings_v2 msv
-            JOIN consumption_units cu ON cu.id = msv.consumption_unit_id
-            WHERE msv.tenant_id = 1
-            ORDER BY cu.name, msv.month
-        """)
-        rows = (await db.execute(sql)).mappings().all()
-    except ProgrammingError:
-        # Fall back to savings_summary (always available)
-        sql = text("""
-            SELECT
-                cu.name                                                             AS unit,
-                cu.code                                                             AS unit_code,
-                TO_CHAR(ss.month, 'YYYY-MM')                                        AS month,
-                ROUND(ss.savings_with_banking
-                      / NULLIF(ss.grid_cost_without_re, 0) * 100, 1)               AS savings_pct,
-                ss.savings_with_banking                                             AS savings_inr,
-                ss.grid_cost_without_re                                             AS grid_cost_inr,
-                ss.total_consumption_kwh                                            AS consumption_kwh
-            FROM savings_summary ss
-            JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
-            WHERE ss.tenant_id = 1
-            ORDER BY cu.name, ss.month
-        """)
-        rows = (await db.execute(sql)).mappings().all()
-
-    return [_row(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Monthly Aggregate — multi-month trend for Chart 1 Monthly view
-# ---------------------------------------------------------------------------
+# ── Monthly Aggregate — multi-month trend ─────────────────────────────────────
 
 @router.get("/monthly-aggregate")
 async def monthly_aggregate(
-    from_month: str = Query("2025-08", description="Start month YYYY-MM"),
-    to_month:   str = Query("2025-11", description="End month YYYY-MM (inclusive)"),
-    unit_ids:   str = Query("", description="Comma-separated unit IDs (empty = all)"),
+    from_month: str = Query("2025-08"),
+    to_month:   str = Query("2025-11"),
+    unit_ids:   str = Query(""),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    """
-    Month-by-month energy flow for the Chart 1 Monthly view.
-    Returns one row per calendar month with:
-      generation_kwh, consumption_kwh, matched_kwh, banking_kwh,
-      grid_kwh, lapsed_kwh, savings_inr, grid_cost_inr, savings_pct.
-
-    Source of truth: monthly_banking_settlement (mbs)
-      - matched_kwh  = mbs.direct_matched_kwh
-      - banking_kwh  = mbs.banking_utilised_kwh  (withdrawals, not deposits)
-      - grid_kwh     = GREATEST(unmet_demand - banking_utilised, 0) per unit, summed
-      - lapsed_kwh   = mbs.surplus_lapsed_kwh; fallback via 8% BESCOM banking loss
-    Grid and Lapsed are mutually exclusive per month.
-    """
-    from_date = _month_str(from_month)
-    to_d      = _month_str(to_month)
-    to_end    = (to_d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-
-    uid_list = _parse_unit_ids(unit_ids)
+    """Month-by-month energy & cost trend for the Gen vs Consumption chart."""
+    from_date = _month_date(from_month)
+    to_date   = _month_date(to_month)
+    uid_list  = _parse_unit_ids(unit_ids)
     uid_sql, uid_params = _uid_clause(uid_list)
-    sav_params = {"from_date": from_date, "to_end": to_end, **uid_params}
 
-    # Generation from 15-min plant readings
+    to_end = (to_date.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     gen_sql = text("""
         SELECT
-            DATE_TRUNC('month', slot_start_time AT TIME ZONE 'Asia/Kolkata')::DATE AS m,
+            DATE_TRUNC('month', slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE AS m,
             SUM(generation_kwh) AS gen_kwh
-        FROM generation_readings
-        WHERE tenant_id = 1
-          AND (slot_start_time AT TIME ZONE 'Asia/Kolkata')::DATE
-              BETWEEN :from_date AND :to_end
+        FROM   c9_slot_generation
+        WHERE  tenant_id = :tid
+          AND  (slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE BETWEEN :from_d AND :to_end
         GROUP BY m ORDER BY m
     """)
     gen_map = {
         str(r["m"])[:7]: float(r["gen_kwh"] or 0)
-        for r in (await db.execute(gen_sql, {"from_date": from_date, "to_end": to_end})).mappings().all()
+        for r in (await db.execute(gen_sql, {"tid": TENANT_ID, "from_d": from_date, "to_end": to_end})).mappings().all()
     }
 
-    # Cost/savings from savings_summary
-    cost_sql = text(f"""
+    sett_sql = text(f"""
         SELECT
-            TO_CHAR(ss.month, 'YYYY-MM')   AS m,
-            SUM(ss.grid_cost_without_re)   AS grid_cost_inr,
-            SUM(ss.savings_with_banking)   AS savings_inr
-        FROM savings_summary ss
-        JOIN consumption_units cu ON cu.id = ss.consumption_unit_id
-        WHERE ss.tenant_id = 1
-          AND ss.month BETWEEN :from_date AND :to_end
+            TO_CHAR(um.month, 'YYYY-MM')                                    AS m,
+            SUM(um.consumption_kwh)                                         AS cons_kwh,
+            SUM(um.matched_settlement)                                      AS matched_kwh,
+            SUM(um.matched_settlement_2)                                    AS banking_kwh,
+            SUM(um.lapse_units)                                             AS lapsed_kwh,
+            SUM(um.grid_consumption)                                        AS grid_kwh,
+            SUM(um.consumption_kwh * cu.tariff_rate)                        AS grid_cost_inr,
+            SUM((um.matched_settlement + um.matched_settlement_2) * :ppa
+                + (um.matched_settlement + um.matched_settlement_2) * :whl) AS actual_cost_inr
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month BETWEEN :from_d AND :to_date
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
           {uid_sql}
-        GROUP BY ss.month ORDER BY ss.month
+        GROUP BY um.month ORDER BY um.month
     """)
-    cost_map = {
+    sett_map = {
         r["m"]: dict(r)
-        for r in (await db.execute(cost_sql, sav_params)).mappings().all()
+        for r in (await db.execute(sett_sql, {
+            "tid": TENANT_ID, "from_d": from_date, "to_date": to_date,
+            "ppa": float(PPA_RATE), "whl": float(WHEELING_RATE),
+            **uid_params
+        })).mappings().all()
     }
-
-    # Settlement breakdown from monthly_banking_settlement — single source of truth
-    try:
-        mbs_sql = text(f"""
-            SELECT
-                TO_CHAR(mbs.month, 'YYYY-MM')                                   AS m,
-                SUM(mbs.total_consumption_kwh)                                   AS cons_kwh,
-                SUM(mbs.direct_matched_kwh)                                      AS matched_kwh,
-                SUM(mbs.banking_utilised_kwh)                                    AS banking_kwh,
-                SUM(COALESCE(mbs.surplus_lapsed_kwh, 0))                        AS lapsed_kwh,
-                SUM(GREATEST(
-                    mbs.unmet_demand_kwh - COALESCE(mbs.banking_utilised_kwh, 0),
-                    0
-                ))                                                                AS grid_kwh
-            FROM monthly_banking_settlement mbs
-            JOIN consumption_units cu ON cu.id = mbs.consumption_unit_id
-            WHERE mbs.tenant_id = 1
-              AND mbs.month BETWEEN :from_date AND :to_end
-              {uid_sql}
-            GROUP BY mbs.month ORDER BY mbs.month
-        """)
-        mbs_map = {
-            r["m"]: dict(r)
-            for r in (await db.execute(mbs_sql, sav_params)).mappings().all()
-        }
-    except Exception:
-        mbs_map = {}
 
     result = []
     cur = from_date
-    while cur <= to_d:
-        key      = cur.strftime("%Y-%m")
-        mbs      = mbs_map.get(key, {})
-        cost     = cost_map.get(key, {})
-        gen_kwh  = gen_map.get(key, 0)
-        cons_kwh = float(mbs.get("cons_kwh") or 0)
-        matched  = float(mbs.get("matched_kwh") or 0)
-        banking  = float(mbs.get("banking_kwh") or 0)
-        grid_kwh = float(mbs.get("grid_kwh") or 0)
-        lapsed   = float(mbs.get("lapsed_kwh") or 0)
-
-        # Fallback: derive lapsed via BESCOM 8% banking loss when DB value is NULL/0.
-        # Only apply when the month has real settlement data (cons_kwh > 0) to avoid
-        # inflating months before the system went live (no mbs rows → cons_kwh = 0
-        # but generation_readings may still have data, which previously caused
-        # lapsed = gen_kwh * 0.92 producing giant phantom bars for Apr–Jul).
-        if lapsed == 0 and gen_kwh > 0 and cons_kwh > 0:
-            gross_surplus = max(0.0, gen_kwh - matched)
-            if gross_surplus > 0:
-                lapsed = max(0.0, gross_surplus * 0.92 - banking)
-
-        grid_cost   = float(cost.get("grid_cost_inr") or 0)
-        savings     = float(cost.get("savings_inr") or 0)
-        savings_pct = round(savings / grid_cost * 100, 1) if grid_cost > 0 else 0
+    while cur <= to_date:
+        key  = cur.strftime("%Y-%m")
+        s    = sett_map.get(key, {})
+        gen_kwh      = gen_map.get(key, 0)
+        cons_kwh     = float(s.get("cons_kwh")    or 0)
+        matched_kwh  = float(s.get("matched_kwh") or 0)
+        banking_kwh  = float(s.get("banking_kwh") or 0)
+        lapsed_kwh   = float(s.get("lapsed_kwh")  or 0)
+        grid_kwh     = float(s.get("grid_kwh")    or 0)
+        grid_cost    = float(s.get("grid_cost_inr")   or 0)
+        actual_cost  = float(s.get("actual_cost_inr") or 0)
+        savings      = max(0, grid_cost - actual_cost)
+        savings_pct  = round(savings / grid_cost * 100, 1) if grid_cost > 0 else 0
 
         result.append({
             "month":           key,
-            "generation_kwh":  round(gen_kwh, 2),
-            "consumption_kwh": round(cons_kwh, 2),
-            "matched_kwh":     round(matched, 2),
-            "banking_kwh":     round(banking, 2),
-            "grid_kwh":        round(grid_kwh, 2),
-            "lapsed_kwh":      round(lapsed, 2),
-            "grid_cost_inr":   round(grid_cost, 2),
-            "savings_inr":     round(savings, 2),
+            "generation_kwh":  round(gen_kwh,    2),
+            "consumption_kwh": round(cons_kwh,   2),
+            "matched_kwh":     round(matched_kwh, 2),
+            "banking_kwh":     round(banking_kwh, 2),
+            "grid_kwh":        round(grid_kwh,   2),
+            "lapsed_kwh":      round(lapsed_kwh, 2),
+            "grid_cost_inr":   round(grid_cost,  2),
+            "savings_inr":     round(savings,    2),
             "savings_pct":     savings_pct,
         })
         cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
 
     return result
+
+
+# ── Chart 2 — Unit-wise savings ───────────────────────────────────────────────
+
+@router.get("/unit-savings")
+async def unit_savings(
+    month:    str = Query("2025-08"),
+    unit_ids: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Per-unit cost & savings from c9_unit_monthly + consumption_units.tariff_rate."""
+    month_date = _month_date(month)
+    uid_list   = _parse_unit_ids(unit_ids)
+    uid_sql, uid_params = _uid_clause(uid_list)
+
+    sql = text(f"""
+        SELECT
+            cu.unit_id,
+            cu.unit_code,
+            cu.unit_name                                                          AS unit,
+            cu.tariff_group,
+            cu.tariff_rate,
+            um.consumption_kwh,
+            um.matched_settlement                                                 AS matched_kwh,
+            um.matched_settlement_2                                               AS banking_kwh,
+            um.lapse_units                                                        AS lapse_units_kwh,
+            um.grid_consumption,
+            um.surplus_demand,
+            um.consumption_kwh * cu.tariff_rate                                   AS grid_cost,
+            um.matched_settlement * :ppa
+            + um.matched_settlement_2 * :ppa
+            + (um.matched_settlement + um.matched_settlement_2) * :whl
+            + um.grid_consumption * cu.tariff_rate                                AS actual_cost_with_banking,
+            um.matched_settlement * :ppa
+            + um.matched_settlement * :whl
+            + um.surplus_demand * cu.tariff_rate                                  AS actual_cost_without_banking
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month     = :m
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
+          {uid_sql}
+        ORDER BY cu.tariff_group, cu.unit_name
+    """)
+    rows = (await db.execute(sql, {
+        "tid": TENANT_ID, "m": month_date,
+        "ppa": float(PPA_RATE), "whl": float(WHEELING_RATE),
+        **uid_params
+    })).mappings().all()
+
+    result = []
+    for r in rows:
+        d          = dict(r)
+        grid_cost  = float(d["grid_cost"]                    or 0)
+        actual_wb  = float(d["actual_cost_with_banking"]     or 0)
+        actual_wob = float(d["actual_cost_without_banking"]  or 0)
+        savings_wb = max(0, grid_cost - actual_wb)
+        savings_wob= max(0, grid_cost - actual_wob)
+        cons_kwh   = float(d["consumption_kwh"] or 0)
+        match_kwh  = float(d["matched_kwh"]     or 0)
+        bank_kwh   = float(d["banking_kwh"]     or 0)
+        result.append({
+            "unit":                        d["unit"],
+            "unit_code":                   d["unit_code"],
+            "unit_id":                     d["unit_id"],
+            "tariff_group":                d["tariff_group"],
+            "tariff_rate":                 float(d["tariff_rate"]),
+            "consumption_kwh":             round(cons_kwh,    2),
+            "matched_kwh":                 round(match_kwh,   2),
+            "banking_kwh":                 round(bank_kwh,    2),
+            "surplus_kwh":                 round(float(d["surplus_demand"]   or 0), 2),
+            "grid_drawl_kwh":              round(float(d["grid_consumption"] or 0), 2),
+            "lapse_units_kwh":             round(float(d["lapse_units_kwh"] or 0), 2),
+            "replacement_pct":             round((match_kwh + bank_kwh) / cons_kwh * 100, 1) if cons_kwh else 0,
+            "grid_cost":                   round(grid_cost,   2),
+            "actual_cost_with_banking":    round(actual_wb,   2),
+            "actual_cost_without_banking": round(actual_wob,  2),
+            "savings_with_banking":        round(savings_wb,  2),
+            "savings_without_banking":     round(savings_wob, 2),
+            "savings_pct_with_banking":    round(savings_wb  / grid_cost * 100, 1) if grid_cost else 0,
+            "savings_pct_without_banking": round(savings_wob / grid_cost * 100, 1) if grid_cost else 0,
+        })
+    return result
+
+
+# ── Chart 4 — TOD Analysis ────────────────────────────────────────────────────
+
+@router.get("/tod-analysis")
+async def tod_analysis(
+    month:    str = Query("2025-08"),
+    unit_ids: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Monthly TOD slot breakdown from c9_monthly_tod."""
+    month_date = _month_date(month)
+    uid_list   = _parse_unit_ids(unit_ids)
+    uid_sql, uid_params = _uid_clause(uid_list, alias="mt")
+
+    sql = text(f"""
+        SELECT
+            mt.tod_slot,
+            SUM(mt.allocated_generation) AS gen_kwh,
+            SUM(mt.consumption_kwh)      AS cons_kwh,
+            SUM(mt.matched_settlement)   AS matched_kwh,
+            SUM(mt.surplus_generation)   AS surplus_gen_kwh,
+            SUM(mt.surplus_demand)       AS surplus_demand_kwh
+        FROM   c9_monthly_tod mt
+        WHERE  mt.tenant_id = :tid
+          AND  mt.month     = :m
+          {uid_sql}
+        GROUP BY mt.tod_slot
+        ORDER BY
+            CASE mt.tod_slot
+                WHEN 'Night_Offpeak'  THEN 1
+                WHEN 'Morning_Peak'   THEN 2
+                WHEN 'Day_Normal'     THEN 3
+                WHEN 'Evening_Peak'   THEN 4
+                ELSE 5
+            END
+    """)
+    rows = (await db.execute(sql, {"tid": TENANT_ID, "m": month_date, **uid_params})).mappings().all()
+
+    SLOT_META = {
+        "Night_Offpeak": ("Night Off-Peak (22-06h)", 0.75),
+        "Morning_Peak":  ("Morning Peak (06-09h)",   1.50),
+        "Day_Normal":    ("Day Normal (09-18h)",      1.00),
+        "Evening_Peak":  ("Evening Peak (18-22h)",   1.50),
+    }
+    BESCOM_RATE_A = 7.20   # Group A reference rate for savings calc
+
+    result = []
+    for r in rows:
+        code  = r["tod_slot"]
+        label, mult = SLOT_META.get(code, (code, 1.0))
+        gen   = float(r["gen_kwh"]     or 0)
+        cons  = float(r["cons_kwh"]    or 0)
+        match = float(r["matched_kwh"] or 0)
+        result.append({
+            "tod_slot":           code,
+            "slot_label":         label,
+            "multiplier":         mult,
+            "generation_kwh":     round(gen,  2),
+            "consumption_kwh":    round(cons, 2),
+            "matched_kwh":        round(match, 2),
+            "direct_matched_kwh": round(match, 2),
+            "surplus_gen_kwh":    round(float(r["surplus_gen_kwh"]    or 0), 2),
+            "surplus_demand_kwh": round(float(r["surplus_demand_kwh"] or 0), 2),
+            "cost_savings_inr":   round(match * (BESCOM_RATE_A - float(PPA_RATE)), 2),
+        })
+    return result
+
+
+# ── Chart 5 — DISCOM Bill Breakdown per unit ──────────────────────────────────
+
+@router.get("/discom-bill")
+async def discom_bill(
+    month:    str = Query("2025-08"),
+    unit_ids: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """
+    Per-unit estimated BESCOM bill breakdown.
+    Shows gross_amount_inr (without RE) vs net_payable_inr (with RE).
+    """
+    month_date = _month_date(month)
+    uid_list   = _parse_unit_ids(unit_ids)
+    uid_sql, uid_params = _uid_clause(uid_list)
+
+    sql = text(f"""
+        SELECT
+            cu.unit_name        AS unit_name,
+            cu.unit_code,
+            cu.unit_id,
+            cu.tariff_group,
+            cu.tariff_rate,
+            um.consumption_kwh,
+            um.matched_settlement,
+            um.matched_settlement_2     AS banking_kwh,
+            um.grid_consumption
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month     = :m
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
+          {uid_sql}
+        ORDER BY cu.tariff_group, cu.unit_name
+    """)
+    rows = (await db.execute(sql, {"tid": TENANT_ID, "m": month_date, **uid_params})).mappings().all()
+
+    result = []
+    for r in rows:
+        d         = dict(r)
+        rate      = float(d["tariff_rate"])
+        cons_kwh  = float(d["consumption_kwh"]     or 0)
+        match_kwh = float(d["matched_settlement"]  or 0)
+        bank_kwh  = float(d["banking_kwh"]         or 0)
+        grid_kwh  = float(d["grid_consumption"]    or 0)
+        re_kwh    = match_kwh + bank_kwh
+
+        # Gross bill (as if no RE — full consumption at grid rate)
+        gross_inr     = cons_kwh * rate
+        energy_charge = gross_inr * 0.65
+        demand_charge = gross_inr * 0.15
+        fac_inr       = cons_kwh * float(FAC_RATE)
+        pg_inr        = cons_kwh * float(PG_RATE)
+        tax_inr       = gross_inr * float(TAX_PCT)
+        wheeling_inr  = re_kwh * float(WHEELING_RATE)
+
+        # Net bill: grid drawl at rate + RE at PPA + wheeling on RE + proportional tax
+        grid_frac = grid_kwh / cons_kwh if cons_kwh else 0
+        net_inr   = (grid_kwh * rate
+                   + re_kwh * float(PPA_RATE)
+                   + wheeling_inr
+                   + tax_inr * grid_frac)
+
+        savings_inr = max(0, gross_inr - net_inr)
+
+        result.append({
+            "unit_name":           d["unit_name"],
+            "unit_code":           d["unit_code"],
+            "tariff_group":        d["tariff_group"],
+            "gross_amount_inr":    round(gross_inr,     2),
+            "net_payable_inr":     round(net_inr,       2),
+            "savings_inr":         round(savings_inr,   2),
+            "total_units_kwh":     round(cons_kwh,      2),
+            "energy_rate_per_kwh": rate,
+            "energy_charge_inr":   round(energy_charge, 2),
+            "demand_charge_inr":   round(demand_charge, 2),
+            "fac_inr":             round(fac_inr,       2),
+            "tax_inr":             round(tax_inr,       2),
+            "pg_surcharge_inr":    round(pg_inr,        2),
+            "wheeling_charge_inr": round(wheeling_inr,  2),
+            "wheeling_energy_kwh": round(re_kwh,        2),
+        })
+    return result
+
+
+# ── Chart 8 — Banking Loss ────────────────────────────────────────────────────
+
+@router.get("/banking-loss")
+async def banking_loss(
+    month:    str = Query("2025-08"),
+    unit_ids: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """
+    Per-unit banking round-2 settlement. Returns BankingLossRow shape:
+    gross_banked_kwh  = raw slot surplus allocated to this unit (pro-rated)
+    banking_loss_kwh  = 8% BESCOM charge on gross surplus
+    net_banked_kwh    = gross_banked after 8% charge
+    settled_kwh       = consumed from bank (matched_settlement_2)
+    expired_kwh       = lapse_units (unused bank credits)
+    closing_balance   = net_banked - settled - expired
+    loss_inr          = banking_loss_kwh × tariff_rate
+    """
+    month_date = _month_date(month)
+    uid_list   = _parse_unit_ids(unit_ids)
+    uid_sql, uid_params = _uid_clause(uid_list)
+
+    # Net banked pool from Slot_Surplus virtual row
+    pool_sql = text("""
+        SELECT
+            um.surplus_generation  AS net_banked_kwh,
+            um.surplus_demand      AS raw_slot_surplus_kwh
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid AND um.month = :m AND cu.unit_code = 'SLOT_SURPLUS'
+        LIMIT 1
+    """)
+    pool_row = (await db.execute(pool_sql, {"tid": TENANT_ID, "m": month_date})).mappings().first()
+    net_banked_pool    = float(pool_row["net_banked_kwh"]       if pool_row else 0) or 0
+    raw_surplus        = float(pool_row["raw_slot_surplus_kwh"] if pool_row else 0) or 0
+    banking_loss_total = max(0, raw_surplus - net_banked_pool)
+
+    sql = text(f"""
+        SELECT
+            cu.unit_name                AS unit,
+            cu.unit_code,
+            cu.unit_id,
+            cu.tariff_rate,
+            um.surplus_demand           AS surplus_demand_kwh,
+            um.matched_settlement_2     AS settled_kwh,
+            um.lapse_units              AS expired_kwh
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month     = :m
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
+          {uid_sql}
+        ORDER BY cu.tariff_group, cu.unit_name
+    """)
+    rows = (await db.execute(sql, {"tid": TENANT_ID, "m": month_date, **uid_params})).mappings().all()
+
+    total_surplus_demand = sum(float(r["surplus_demand_kwh"] or 0) for r in rows)
+
+    result = []
+    for r in rows:
+        d            = dict(r)
+        surplus_d    = float(d["surplus_demand_kwh"] or 0)
+        settled      = float(d["settled_kwh"]        or 0)
+        expired      = float(d["expired_kwh"]        or 0)
+        share        = surplus_d / total_surplus_demand if total_surplus_demand > 0 else 0
+        gross_banked = round(raw_surplus * share,        2)
+        net_banked   = round(net_banked_pool * share,    2)
+        bank_loss    = round(banking_loss_total * share, 2)
+        closing      = max(0, round(net_banked - settled - expired, 2))
+        loss_inr     = round(bank_loss * float(d["tariff_rate"]), 2)
+
+        result.append({
+            "unit":                d["unit"],
+            "unit_code":           d["unit_code"],
+            "unit_id":             d["unit_id"],
+            "tariff_rate":         float(d["tariff_rate"]),
+            "gross_banked_kwh":    gross_banked,
+            "banking_loss_kwh":    bank_loss,
+            "net_banked_kwh":      net_banked,
+            "settled_kwh":         round(settled, 2),
+            "expired_kwh":         round(expired, 2),
+            "closing_balance_kwh": closing,
+            "loss_inr":            loss_inr,
+        })
+    return result
+
+
+# ── Chart 10 — Wheeling Reconciliation ───────────────────────────────────────
+
+@router.get("/wheeling-recon")
+async def wheeling_recon(
+    month:    str = Query("2025-08"),
+    unit_ids: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """
+    Wheeling reconciliation: proposed vs actual RE units wheeled per unit.
+    Returns WheelingReconRow shape.
+    """
+    month_date = _month_date(month)
+    uid_list   = _parse_unit_ids(unit_ids)
+    uid_sql, uid_params = _uid_clause(uid_list)
+
+    sql = text(f"""
+        SELECT
+            cu.unit_name                                            AS unit,
+            cu.unit_code,
+            cu.unit_id,
+            cu.tariff_rate,
+            (um.matched_settlement + um.matched_settlement_2)       AS proposed_kwh,
+            (um.matched_settlement + um.matched_settlement_2)       AS actual_kwh
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month     = :m
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
+          {uid_sql}
+        ORDER BY cu.tariff_group, cu.unit_name
+    """)
+    rows = (await db.execute(sql, {"tid": TENANT_ID, "m": month_date, **uid_params})).mappings().all()
+
+    result = []
+    for r in rows:
+        d        = dict(r)
+        proposed = float(d["proposed_kwh"] or 0)
+        actual   = float(d["actual_kwh"]   or 0)
+        gap_kwh  = round(proposed - actual, 2)
+        gap_inr  = round(abs(gap_kwh) * float(d["tariff_rate"]), 2)
+        status   = "OK" if abs(gap_kwh) < 0.01 else ("OVER" if gap_kwh > 0 else "UNDER")
+        result.append({
+            "unit":         d["unit"],
+            "unit_code":    d["unit_code"],
+            "proposed_kwh": round(proposed, 2),
+            "actual_kwh":   round(actual,   2),
+            "gap_kwh":      gap_kwh,
+            "gap_inr":      gap_inr,
+            "status":       status,
+        })
+    return result
+
+
+# ── Chart 11 — Surplus & Absorption Flow ─────────────────────────────────────
+
+@router.get("/surplus-absorption")
+async def surplus_absorption(
+    month:    str = Query("2025-08"),
+    unit_ids: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """
+    Per-unit energy flow. Returns SurplusAbsorptionRow shape:
+    generation_kwh → direct_matched_kwh (R1) → gross_surplus_kwh →
+    banking_settled_kwh (R2) → banking_expired_kwh / grid_drawl_kwh
+    """
+    month_date = _month_date(month)
+    uid_list   = _parse_unit_ids(unit_ids)
+    uid_sql, uid_params = _uid_clause(uid_list)
+
+    # Allocated generation from c9_monthly_tod (sum across TOD slots per unit)
+    gen_sql = text(f"""
+        SELECT unit_id, SUM(allocated_generation) AS alloc_gen_kwh
+        FROM   c9_monthly_tod
+        WHERE  tenant_id = :tid AND month = :m
+        GROUP BY unit_id
+    """)
+    gen_map = {
+        r["unit_id"]: float(r["alloc_gen_kwh"] or 0)
+        for r in (await db.execute(gen_sql, {"tid": TENANT_ID, "m": month_date})).mappings().all()
+    }
+
+    sql = text(f"""
+        SELECT
+            cu.unit_name                                               AS unit,
+            cu.unit_code,
+            cu.unit_id,
+            cu.tariff_group,
+            um.consumption_kwh,
+            um.matched_settlement                                      AS direct_matched_kwh,
+            um.surplus_demand                                          AS gross_surplus_kwh,
+            um.matched_settlement_2                                    AS banking_settled_kwh,
+            um.lapse_units                                             AS banking_expired_kwh,
+            um.grid_consumption                                        AS grid_drawl_kwh,
+            (um.matched_settlement + um.matched_settlement_2)          AS total_matched_kwh,
+            ROUND(
+                (um.matched_settlement + um.matched_settlement_2)::NUMERIC
+                / NULLIF(um.consumption_kwh, 0) * 100, 1
+            ) AS replacement_pct
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  um.month     = :m
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
+          {uid_sql}
+        ORDER BY cu.tariff_group, cu.unit_name
+    """)
+    rows = (await db.execute(sql, {"tid": TENANT_ID, "m": month_date, **uid_params})).mappings().all()
+
+    result = []
+    for r in rows:
+        d   = dict(r)
+        uid = d["unit_id"]
+        result.append({
+            "unit":                d["unit"],
+            "unit_code":           d["unit_code"],
+            "tariff_group":        d["tariff_group"],
+            "generation_kwh":      round(gen_map.get(uid, 0), 2),
+            "consumption_kwh":     round(float(d["consumption_kwh"]      or 0), 2),
+            "direct_matched_kwh":  round(float(d["direct_matched_kwh"]   or 0), 2),
+            "gross_surplus_kwh":   round(float(d["gross_surplus_kwh"]    or 0), 2),
+            "banking_settled_kwh": round(float(d["banking_settled_kwh"]  or 0), 2),
+            "banking_expired_kwh": round(float(d["banking_expired_kwh"]  or 0), 2),
+            "grid_drawl_kwh":      round(float(d["grid_drawl_kwh"]       or 0), 2),
+            "total_matched_kwh":   round(float(d["total_matched_kwh"]    or 0), 2),
+            "replacement_pct":     float(d["replacement_pct"] or 0),
+        })
+    return result
+
+
+# ── Chart 3 — Savings Heatmap (all months × all units) ───────────────────────
+
+@router.get("/savings-heatmap")
+async def savings_heatmap(
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Savings % heatmap: all available months × all units."""
+    sql = text("""
+        SELECT
+            cu.unit_name                                                              AS unit,
+            cu.unit_code,
+            TO_CHAR(um.month, 'YYYY-MM')                                              AS month,
+            um.consumption_kwh,
+            um.consumption_kwh * cu.tariff_rate                                       AS grid_cost_inr,
+            (um.matched_settlement + um.matched_settlement_2) * :ppa
+            + (um.matched_settlement + um.matched_settlement_2) * :whl
+            + um.grid_consumption * cu.tariff_rate                                    AS actual_cost_inr,
+            ROUND(
+                (um.consumption_kwh * cu.tariff_rate
+                 - ((um.matched_settlement + um.matched_settlement_2) * :ppa
+                    + (um.matched_settlement + um.matched_settlement_2) * :whl
+                    + um.grid_consumption * cu.tariff_rate)
+                ) / NULLIF(um.consumption_kwh * cu.tariff_rate, 0) * 100, 1
+            ) AS savings_pct
+        FROM   c9_unit_monthly um
+        JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        WHERE  um.tenant_id = :tid
+          AND  cu.unit_code <> 'SLOT_SURPLUS'
+        ORDER BY cu.unit_name, um.month
+    """)
+    rows = (await db.execute(sql, {
+        "tid": TENANT_ID,
+        "ppa": float(PPA_RATE),
+        "whl": float(WHEELING_RATE),
+    })).mappings().all()
+    return [_row(r) for r in rows]
+
+
+# ── Chart 15 — 24h × 7-day Heatmap ──────────────────────────────────────────
+
+@router.get("/heatmap")
+async def heatmap(
+    month: str = Query("2025-08"),
+    db:    AsyncSession = Depends(get_db),
+) -> dict:
+    """Average gen/cons per hour-of-day × day-of-week (IST)."""
+    start, end = _month_range(month)
+
+    cons_sql = text("""
+        SELECT
+            EXTRACT(HOUR FROM slot_ts AT TIME ZONE 'Asia/Kolkata')::INT             AS hr,
+            ((EXTRACT(DOW FROM slot_ts AT TIME ZONE 'Asia/Kolkata')::INT + 6) % 7) AS dow,
+            AVG(consumption_kwh) AS avg_cons
+        FROM   c9_slot_consumption
+        WHERE  tenant_id = :tid
+          AND  (slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE BETWEEN :start AND :end
+        GROUP BY hr, dow
+    """)
+    cons_rows = (await db.execute(cons_sql, {"tid": TENANT_ID, "start": start, "end": end})).mappings().all()
+
+    gen_sql = text("""
+        SELECT
+            EXTRACT(HOUR FROM slot_ts AT TIME ZONE 'Asia/Kolkata')::INT             AS hr,
+            ((EXTRACT(DOW FROM slot_ts AT TIME ZONE 'Asia/Kolkata')::INT + 6) % 7) AS dow,
+            AVG(generation_kwh) AS avg_gen
+        FROM   c9_slot_generation
+        WHERE  tenant_id = :tid
+          AND  (slot_ts AT TIME ZONE 'Asia/Kolkata')::DATE BETWEEN :start AND :end
+        GROUP BY hr, dow
+    """)
+    gen_rows = (await db.execute(gen_sql, {"tid": TENANT_ID, "start": start, "end": end})).mappings().all()
+
+    cons_map = {(int(r["hr"]), int(r["dow"])): float(r["avg_cons"] or 0) for r in cons_rows}
+    gen_map  = {(int(r["hr"]), int(r["dow"])): float(r["avg_gen"]  or 0) for r in gen_rows}
+
+    net_matrix, gen_matrix, cons_matrix = [], [], []
+    for h in range(24):
+        nr, gr, cr = [], [], []
+        for dw in range(7):
+            g = gen_map.get((h, dw))
+            c = cons_map.get((h, dw))
+            if g is None and c is None:
+                nr.append(None); gr.append(None); cr.append(None)
+            else:
+                g = g or 0; c = c or 0
+                gr.append(round(g, 1))
+                cr.append(round(c, 1))
+                nr.append(round(g - c, 1))
+        net_matrix.append(nr)
+        gen_matrix.append(gr)
+        cons_matrix.append(cr)
+
+    return {
+        "hours":       list(range(24)),
+        "days":        ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "net_matrix":  net_matrix,
+        "gen_matrix":  gen_matrix,
+        "cons_matrix": cons_matrix,
+    }
