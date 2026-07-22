@@ -145,6 +145,19 @@ export interface UnitMaster {
   tariff_category?: string
 }
 
+export interface MonthlyAggregateRow {
+  month:           string
+  generation_kwh:  number
+  consumption_kwh: number
+  matched_kwh:     number
+  banking_kwh:     number
+  grid_kwh:        number
+  lapsed_kwh:      number
+  grid_cost_inr:   number
+  savings_inr:     number
+  savings_pct:     number
+}
+
 // ── GIL Types ──────────────────────────────────────────────────────────────
 
 export interface GILKpiSummary {
@@ -358,6 +371,8 @@ export const api = {
     wheelingRecon:     (month: string, p?: Record<string, unknown>) => c9('wheeling-recon', month, p).then(r => r.data as WheelingReconRow[]),
     surplusAbsorption: (month: string, p?: Record<string, unknown>) => c9('surplus-absorption', month, p).then(r => r.data as SurplusAbsorptionRow[]),
     heatmap:           (month: string, p?: Record<string, unknown>) => c9('heatmap', month, p).then(r => r.data as HeatmapData),
+    monthlyAggregate:  (fromMonth: string, toMonth: string, p?: Record<string, unknown>) =>
+      http.get<MonthlyAggregateRow[]>('/c9/monthly-aggregate', { params: { from_month: fromMonth, to_month: toMonth, ...p } }).then(r => r.data),
     savingsHeatmap:    () => http.get<SavingsHeatmapRow[]>('/c9/savings-heatmap').then(r => r.data),
     units:             () => http.get<UnitMaster[]>('/c9/units').then(r => r.data),
     upload:            (formData: FormData, unitId?: number, peid?: number) =>

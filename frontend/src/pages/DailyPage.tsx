@@ -16,7 +16,6 @@ export default function DailyPage() {
     gen:     data.reduce((s, r) => s + r.generation_kwh,  0),
     cons:    data.reduce((s, r) => s + r.consumption_kwh, 0),
     matched: data.reduce((s, r) => s + r.matched_kwh,     0),
-    banking: data.reduce((s, r) => s + r.banking_kwh,     0),
     grid:    data.reduce((s, r) => s + r.grid_kwh,        0),
   } : null
 
@@ -27,13 +26,12 @@ export default function DailyPage() {
       <div style={{ padding: 24 }}>
         {/* Month totals */}
         {totals && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 12, marginBottom: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
             {[
-              { label: 'Generation',      val: totals.gen,     c: 'var(--color-green-light)' },
-              { label: 'Consumption',     val: totals.cons,    c: 'var(--color-blue)' },
-              { label: 'Direct Matched',  val: totals.matched, c: '#22d896' },
-              { label: 'Banking Settled', val: totals.banking, c: 'var(--color-amber)' },
-              { label: 'Grid Import',     val: totals.grid,    c: 'var(--color-red)' },
+              { label: 'Generation',     val: totals.gen,     c: 'var(--color-green-light)' },
+              { label: 'Consumption',    val: totals.cons,    c: 'var(--color-blue)' },
+              { label: 'Direct Matched', val: totals.matched, c: '#22d896' },
+              { label: 'Grid Import',    val: totals.grid,    c: 'var(--color-red)' },
             ].map(({ label, val, c }) => (
               <div key={label} className="card" style={{ textAlign: 'center' }}>
                 <div className="card-title" style={{ marginBottom: 4 }}>{label}</div>
@@ -63,7 +61,6 @@ export default function DailyPage() {
                   <th style={{ textAlign: 'right' }}>Generation</th>
                   <th style={{ textAlign: 'right' }}>Consumption</th>
                   <th style={{ textAlign: 'right' }}>Matched</th>
-                  <th style={{ textAlign: 'right' }}>Banking</th>
                   <th style={{ textAlign: 'right' }}>Grid</th>
                 </tr>
               </thead>
@@ -74,7 +71,6 @@ export default function DailyPage() {
                     <td style={{ textAlign: 'right' }}>{fmt(r.generation_kwh)}</td>
                     <td style={{ textAlign: 'right' }}>{fmt(r.consumption_kwh)}</td>
                     <td style={{ textAlign: 'right', color: '#22d896' }}>{fmt(r.matched_kwh)}</td>
-                    <td style={{ textAlign: 'right', color: 'var(--color-amber)' }}>{fmt(r.banking_kwh)}</td>
                     <td style={{ textAlign: 'right', color: 'var(--color-red)' }}>{fmt(r.grid_kwh)}</td>
                   </tr>
                 ))}

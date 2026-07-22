@@ -23,7 +23,6 @@ export default function DailyBarChart({ data }: Props) {
   const labels   = data.map(r => r.date.slice(5))           // MM-DD
   const gen      = data.map(r => r.generation_kwh)
   const matched  = data.map(r => r.matched_kwh)
-  const banking  = data.map(r => r.banking_kwh)
   const grid     = data.map(r => r.grid_kwh)
   const cons     = data.map(r => r.consumption_kwh)
 
@@ -58,14 +57,6 @@ export default function DailyBarChart({ data }: Props) {
         label: 'Matched (Direct)',
         data: matched,
         backgroundColor: 'rgba(34,216,150,0.75)',
-        stack: 'settlement',
-        yAxisID: 'y',
-      },
-      {
-        type: 'bar' as const,
-        label: 'Banking Settled',
-        data: banking,
-        backgroundColor: 'rgba(245,158,11,0.75)',
         stack: 'settlement',
         yAxisID: 'y',
       },
