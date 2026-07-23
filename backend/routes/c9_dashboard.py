@@ -410,10 +410,14 @@ async def unit_savings(
             SUM(um.grid_consumption)                                                  AS grid_consumption,
             SUM(um.surplus_demand)                                                    AS surplus_demand,
             SUM(um.consumption_kwh)      * cu.tariff_rate                             AS grid_cost,
-            SUM(um.matched_settlement)   * :ppa
-            + SUM(um.matched_settlement_2) * :ppa
-            + (SUM(um.matched_settlement) + SUM(um.matched_settlement_2)) * :whl
-            + SUM(um.grid_consumption)   * cu.tariff_rate                             AS actual_cost_with_banking,
+            CASE
+              WHEN SUM(um.grid_consumption) = 0 THEN
+                (SUM(um.matched_settlement) + SUM(um.matched_settlement_2)) * :ppa
+              ELSE
+                (SUM(um.matched_settlement) + SUM(um.matched_settlement_2)) * :ppa
+                + (SUM(um.matched_settlement) + SUM(um.matched_settlement_2)) * :whl
+                + SUM(um.grid_consumption) * cu.tariff_rate
+            END                                                                        AS actual_cost_with_banking,
             SUM(um.matched_settlement)   * :ppa
             + SUM(um.matched_settlement) * :whl
             + SUM(um.surplus_demand)     * cu.tariff_rate                             AS actual_cost_without_banking
