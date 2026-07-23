@@ -307,24 +307,35 @@ async def monthly_aggregate(
     }
 
     sett_sql = text(f"""
+        WITH slot_lapse AS (
+            SELECT um2.month, SUM(um2.lapse_units) AS lapsed_kwh
+            FROM   c9_unit_monthly um2
+            JOIN   consumption_units cu2 ON cu2.unit_id = um2.unit_id
+            WHERE  cu2.unit_code = 'SLOT_SURPLUS'
+              AND  um2.tenant_id = :tid
+              AND  um2.month BETWEEN :from_d AND :to_date
+            GROUP BY um2.month
+        )
         SELECT
             TO_CHAR(um.month, 'YYYY-MM')                                    AS m,
             SUM(um.consumption_kwh)                                         AS cons_kwh,
             SUM(um.matched_settlement)                                      AS matched_kwh,
             SUM(um.matched_settlement_2)                                    AS banking_kwh,
-            SUM(um.lapse_units)                                             AS lapsed_kwh,
+            COALESCE(MAX(sl.lapsed_kwh), 0)                                 AS lapsed_kwh,
             SUM(um.grid_consumption)                                        AS grid_kwh,
             SUM(um.consumption_kwh * cu.tariff_rate)                        AS grid_cost_inr,
             SUM((um.matched_settlement + um.matched_settlement_2) * :ppa
                 + (um.matched_settlement + um.matched_settlement_2) * :whl) AS actual_cost_inr
         FROM   c9_unit_monthly um
         JOIN   consumption_units cu ON cu.unit_id = um.unit_id
+        LEFT JOIN slot_lapse sl ON sl.month = um.month
         WHERE  um.tenant_id = :tid
           AND  um.month BETWEEN :from_d AND :to_date
           AND  cu.unit_code <> 'SLOT_SURPLUS'
           {uid_sql}
         GROUP BY um.month ORDER BY um.month
     """)
+
     sett_map = {
         r["m"]: dict(r)
         for r in (await db.execute(sett_sql, {
@@ -919,3 +930,4 @@ async def heatmap(
         "gen_matrix":  gen_matrix,
         "cons_matrix": cons_matrix,
     }
+

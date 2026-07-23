@@ -16,8 +16,13 @@ export default function DailyPage() {
     gen:     data.reduce((s, r) => s + r.generation_kwh,  0),
     cons:    data.reduce((s, r) => s + r.consumption_kwh, 0),
     matched: data.reduce((s, r) => s + r.matched_kwh,     0),
+    banking: data.reduce((s, r) => s + r.banking_kwh,     0),
     grid:    data.reduce((s, r) => s + r.grid_kwh,        0),
+    lapsed:  data.reduce((s, r) => s + (r.lapsed_kwh ?? Math.max(0, r.generation_kwh - r.matched_kwh - r.banking_kwh)), 0),
   } : null
+
+  const hasGrid   = totals ? totals.grid   > 0 : false
+  const hasLapsed = totals ? totals.lapsed > 0 : false
 
   return (
     <div>
@@ -26,12 +31,16 @@ export default function DailyPage() {
       <div style={{ padding: 24 }}>
         {/* Month totals */}
         {totals && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 12, marginBottom: 20 }}>
             {[
               { label: 'Generation',     val: totals.gen,     c: 'var(--color-green-light)' },
               { label: 'Consumption',    val: totals.cons,    c: 'var(--color-blue)' },
               { label: 'Direct Matched', val: totals.matched, c: '#22d896' },
-              { label: 'Grid Import',    val: totals.grid,    c: 'var(--color-red)' },
+              { label: 'Banking Used',   val: totals.banking, c: 'rgba(245,166,35,1)' },
+              // In surplus months show Lapsed; in deficit months show Grid Import
+              hasGrid
+                ? { label: 'Grid Import',    val: totals.grid,   c: 'var(--color-red)' }
+                : { label: 'Lapsed Units',   val: totals.lapsed, c: 'rgba(245,100,35,1)' },
             ].map(({ label, val, c }) => (
               <div key={label} className="card" style={{ textAlign: 'center' }}>
                 <div className="card-title" style={{ marginBottom: 4 }}>{label}</div>
@@ -61,19 +70,26 @@ export default function DailyPage() {
                   <th style={{ textAlign: 'right' }}>Generation</th>
                   <th style={{ textAlign: 'right' }}>Consumption</th>
                   <th style={{ textAlign: 'right' }}>Matched</th>
-                  <th style={{ textAlign: 'right' }}>Grid</th>
+                  <th style={{ textAlign: 'right' }}>Banking Used</th>
+                  {hasGrid   && <th style={{ textAlign: 'right' }}>Grid Import</th>}
+                  {hasLapsed && <th style={{ textAlign: 'right' }}>Lapsed Units</th>}
                 </tr>
               </thead>
               <tbody>
-                {data.map(r => (
-                  <tr key={r.date}>
-                    <td>{r.date}</td>
-                    <td style={{ textAlign: 'right' }}>{fmt(r.generation_kwh)}</td>
-                    <td style={{ textAlign: 'right' }}>{fmt(r.consumption_kwh)}</td>
-                    <td style={{ textAlign: 'right', color: '#22d896' }}>{fmt(r.matched_kwh)}</td>
-                    <td style={{ textAlign: 'right', color: 'var(--color-red)' }}>{fmt(r.grid_kwh)}</td>
-                  </tr>
-                ))}
+                {data.map(r => {
+                  const lapsed = r.lapsed_kwh ?? Math.max(0, r.generation_kwh - r.matched_kwh - r.banking_kwh)
+                  return (
+                    <tr key={r.date}>
+                      <td>{r.date}</td>
+                      <td style={{ textAlign: 'right' }}>{fmt(r.generation_kwh)}</td>
+                      <td style={{ textAlign: 'right' }}>{fmt(r.consumption_kwh)}</td>
+                      <td style={{ textAlign: 'right', color: '#22d896' }}>{fmt(r.matched_kwh)}</td>
+                      <td style={{ textAlign: 'right', color: 'rgba(245,166,35,1)' }}>{fmt(r.banking_kwh)}</td>
+                      {hasGrid   && <td style={{ textAlign: 'right', color: 'var(--color-red)' }}>{fmt(r.grid_kwh)}</td>}
+                      {hasLapsed && <td style={{ textAlign: 'right', color: 'rgba(245,100,35,1)' }}>{fmt(lapsed)}</td>}
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>

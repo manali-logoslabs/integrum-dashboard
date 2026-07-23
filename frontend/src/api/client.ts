@@ -21,6 +21,7 @@ export interface DailySummaryRow {
   matched_kwh:      number
   banking_kwh:      number
   grid_kwh:         number
+  lapsed_kwh:       number
 }
 
 export interface UnitSavingsRow {

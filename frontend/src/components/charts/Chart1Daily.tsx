@@ -58,28 +58,39 @@ function Chart1Monthly({ fromMonth, toMonth, anchorMonth, unitIds }: {
   if (loading) return <div style={{ height: 280, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><div className="spinner" /></div>
   if (!data?.length) return <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>No data for {from} → {to}</div>
 
-  // Live chart structure: two bar groups per month (stack: 'gen' on left, stack: 'cons' on right).
-  // Generation is a standalone bar on the left; settlement breakdown is a stacked bar on the right.
-  // Lapsed (surplus months) stacks before Grid (deficit months) — mutually exclusive.
+  // Chart layout — three bar groups per month:
+  //   'gen'  (left)  : Generation total
+  //   'cons' (middle): Consumption total (transparent border bar so height is visible)
+  //   'sett' (right) : Settlement breakdown stacked (Matched + Banking + Lapsed/Grid)
+  //                    — total ≈ Consumption, breakdown shows how demand was met
   const chartData = {
     labels: data.map(r => r.month),
     datasets: [
-      // Generation — standalone bar (left group), matches live chart's green left bar
-      { type: 'bar' as const, label: 'Generation',  data: data.map(r => r.generation_kwh),
+      // ── Generation bar (left) ────────────────────────────────────────────
+      { type: 'bar' as const, label: 'Generation',
+        data: data.map(r => r.generation_kwh),
         backgroundColor: 'rgba(29,191,122,.85)', borderWidth: 0, stack: 'gen', order: 1 },
-      // Consumption — subtle dashed line so the consumption target remains visible
-      { type: 'line' as const, label: 'Consumption', data: data.map(r => r.consumption_kwh),
-        borderColor: 'rgba(74,158,255,.55)', borderWidth: 1.5, pointRadius: 2, tension: .3,
-        fill: false, backgroundColor: 'transparent', borderDash: [4, 3], order: 0 },
-      // Settlement breakdown — stacked bar (right group)
-      { type: 'bar' as const, label: 'Matched Settlement',      data: data.map(r => r.matched_kwh),
-        backgroundColor: 'rgba(38,232,144,.75)', borderWidth: 0, stack: 'cons', order: 1 },
-      { type: 'bar' as const, label: 'Settlement with Banking', data: data.map(r => r.banking_kwh),
-        backgroundColor: 'rgba(29,80,180,.8)',   borderWidth: 0, stack: 'cons', order: 1 },
-      { type: 'bar' as const, label: 'Lapsed Units',            data: data.map(r => r.lapsed_kwh || 0),
-        backgroundColor: 'rgba(245,166,35,.75)', borderWidth: 0, stack: 'cons', order: 1 },
-      { type: 'bar' as const, label: 'Grid Consumption',        data: data.map(r => r.grid_kwh),
-        backgroundColor: 'rgba(232,72,72,.8)',   borderWidth: 0, stack: 'cons', order: 1 },
+
+      // ── Consumption bar (middle) — outline only so height is clear ───────
+      { type: 'bar' as const, label: 'Consumption',
+        data: data.map(r => r.consumption_kwh),
+        backgroundColor: 'rgba(74,158,255,.12)',
+        borderColor: 'rgba(74,158,255,.85)', borderWidth: 2,
+        stack: 'cons', order: 1 },
+
+      // ── Settlement breakdown (right) — stacked, adds up to ≈ Consumption ─
+      { type: 'bar' as const, label: 'Matched Settlement',
+        data: data.map(r => r.matched_kwh),
+        backgroundColor: 'rgba(38,232,144,.75)', borderWidth: 0, stack: 'sett', order: 1 },
+      { type: 'bar' as const, label: 'Settlement with Banking',
+        data: data.map(r => r.banking_kwh),
+        backgroundColor: 'rgba(29,80,180,.8)', borderWidth: 0, stack: 'sett', order: 1 },
+      { type: 'bar' as const, label: 'Lapsed Units',
+        data: data.map(r => (!r.grid_kwh || r.grid_kwh === 0) ? (r.lapsed_kwh || 0) : 0),
+        backgroundColor: 'rgba(245,166,35,.75)', borderWidth: 0, stack: 'sett', order: 1 },
+      { type: 'bar' as const, label: 'Grid Consumption',
+        data: data.map(r => (r.grid_kwh > 0) ? r.grid_kwh : 0),
+        backgroundColor: 'rgba(232,72,72,.8)', borderWidth: 0, stack: 'sett', order: 1 },
     ],
   }
   return (
@@ -130,11 +141,6 @@ export default function Chart1Daily({ month, chartType = 'monthly', fromMonth, t
     )
   }
 
-  // Lapsed Units = generation surplus that expired (not consumed or banked)
-  const lapsedData = data.map(r =>
-    Math.max(0, (r.generation_kwh || 0) - (r.matched_kwh || 0) - (r.banking_kwh || 0))
-  )
-
   const chartData = {
     labels,
     datasets: [
@@ -162,33 +168,6 @@ export default function Chart1Daily({ month, chartType = 'monthly', fromMonth, t
         label: 'Direct Match',
         data: data.map(r => r.matched_kwh),
         borderColor: 'rgba(38,232,144,.9)', backgroundColor: 'rgba(38,232,144,.7)',
-        borderWidth: isLine ? 2 : 0, pointRadius: 0, tension: .3,
-        fill: isFill ? 'origin' : false,
-        stack: isLine ? undefined : 'cons', order: 1,
-      },
-      {
-        type: (isLine ? 'line' : 'bar') as any,
-        label: 'Banking Used',
-        data: data.map(r => r.banking_kwh),
-        borderColor: 'rgba(245,166,35,.9)', backgroundColor: 'rgba(245,166,35,.7)',
-        borderWidth: isLine ? 2 : 0, pointRadius: 0, tension: .3,
-        fill: isFill ? 'origin' : false,
-        stack: isLine ? undefined : 'cons', order: 1,
-      },
-      {
-        type: (isLine ? 'line' : 'bar') as any,
-        label: 'Grid Drawl',
-        data: data.map(r => r.grid_kwh),
-        borderColor: 'rgba(232,72,72,.9)', backgroundColor: 'rgba(232,72,72,.7)',
-        borderWidth: isLine ? 2 : 0, pointRadius: 0, tension: .3,
-        fill: isFill ? 'origin' : false,
-        stack: isLine ? undefined : 'cons', order: 1,
-      },
-      {
-        type: (isLine ? 'line' : 'bar') as any,
-        label: 'Lapsed Units',
-        data: lapsedData,
-        borderColor: 'rgba(245,100,35,.9)', backgroundColor: 'rgba(245,100,35,.65)',
         borderWidth: isLine ? 2 : 0, pointRadius: 0, tension: .3,
         fill: isFill ? 'origin' : false,
         stack: isLine ? undefined : 'cons', order: 1,
