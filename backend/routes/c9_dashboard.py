@@ -382,46 +382,52 @@ async def monthly_aggregate(
 
 @router.get("/unit-savings")
 async def unit_savings(
-    month:    str = Query("2025-08"),
-    unit_ids: str = Query(""),
+    month:      str = Query("2025-08"),
+    from_month: str = Query(""),
+    to_month:   str = Query(""),
+    unit_ids:   str = Query(""),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    """Per-unit cost & savings from c9_unit_monthly + consumption_units.tariff_rate."""
-    month_date = _month_date(month)
-    uid_list   = _parse_unit_ids(unit_ids)
+    """Per-unit cost & savings aggregated across a month range.
+    If from_month/to_month are provided they take precedence over month.
+    """
+    from_date = _month_date(from_month if from_month else month)
+    to_date   = _month_date(to_month   if to_month   else month)
+    uid_list  = _parse_unit_ids(unit_ids)
     uid_sql, uid_params = _uid_clause(uid_list)
 
     sql = text(f"""
         SELECT
             cu.unit_id,
             cu.unit_code,
-            cu.unit_name                                                          AS unit,
+            cu.unit_name                                                              AS unit,
             cu.tariff_group,
             cu.tariff_rate,
-            um.consumption_kwh,
-            um.matched_settlement                                                 AS matched_kwh,
-            um.matched_settlement_2                                               AS banking_kwh,
-            um.lapse_units                                                        AS lapse_units_kwh,
-            um.grid_consumption,
-            um.surplus_demand,
-            um.consumption_kwh * cu.tariff_rate                                   AS grid_cost,
-            um.matched_settlement * :ppa
-            + um.matched_settlement_2 * :ppa
-            + (um.matched_settlement + um.matched_settlement_2) * :whl
-            + um.grid_consumption * cu.tariff_rate                                AS actual_cost_with_banking,
-            um.matched_settlement * :ppa
-            + um.matched_settlement * :whl
-            + um.surplus_demand * cu.tariff_rate                                  AS actual_cost_without_banking
+            SUM(um.consumption_kwh)                                                   AS consumption_kwh,
+            SUM(um.matched_settlement)                                                AS matched_kwh,
+            SUM(um.matched_settlement_2)                                              AS banking_kwh,
+            SUM(um.lapse_units)                                                       AS lapse_units_kwh,
+            SUM(um.grid_consumption)                                                  AS grid_consumption,
+            SUM(um.surplus_demand)                                                    AS surplus_demand,
+            SUM(um.consumption_kwh)      * cu.tariff_rate                             AS grid_cost,
+            SUM(um.matched_settlement)   * :ppa
+            + SUM(um.matched_settlement_2) * :ppa
+            + (SUM(um.matched_settlement) + SUM(um.matched_settlement_2)) * :whl
+            + SUM(um.grid_consumption)   * cu.tariff_rate                             AS actual_cost_with_banking,
+            SUM(um.matched_settlement)   * :ppa
+            + SUM(um.matched_settlement) * :whl
+            + SUM(um.surplus_demand)     * cu.tariff_rate                             AS actual_cost_without_banking
         FROM   c9_unit_monthly um
         JOIN   consumption_units cu ON cu.unit_id = um.unit_id
         WHERE  um.tenant_id = :tid
-          AND  um.month     = :m
+          AND  um.month BETWEEN :from_d AND :to_d
           AND  cu.unit_code <> 'SLOT_SURPLUS'
           {uid_sql}
-        ORDER BY cu.tariff_group, cu.unit_name
+        GROUP BY cu.unit_id, cu.unit_code, cu.unit_name, cu.tariff_group, cu.tariff_rate
+        ORDER BY grid_cost DESC
     """)
     rows = (await db.execute(sql, {
-        "tid": TENANT_ID, "m": month_date,
+        "tid": TENANT_ID, "from_d": from_date, "to_d": to_date,
         "ppa": float(PPA_RATE), "whl": float(WHEELING_RATE),
         **uid_params
     })).mappings().all()

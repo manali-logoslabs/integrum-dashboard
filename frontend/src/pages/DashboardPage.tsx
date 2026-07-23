@@ -82,7 +82,7 @@ function WidgetContent({ widgetId, filters, chartType }: { widgetId: string; fil
   switch (widgetId) {
     case 'kpi_cards':       return <ChartKpi              month={month} unitIds={uid} />
     case 'gen_cons_daily':  return <Chart1Daily           month={month} chartType={chartType} fromMonth={fromMonth} toMonth={toMonth} unitIds={uid} />
-    case 'power_cost':      return <Chart2PowerCost       month={month} chartType={chartType} unitIds={uid} />
+    case 'power_cost':      return <Chart2PowerCost       month={month} chartType={chartType} fromMonth={fromMonth} toMonth={toMonth} unitIds={uid} />
     case 'savings_heatmap': return <Chart3SavingsHeatmap  month={month} />
     case 'tod_analysis':    return <Chart4Tod             month={month} chartType={chartType} unitIds={uid} />
     case 'banking_cost':    return <Chart5Banking         month={month} chartType={chartType} unitIds={uid} />

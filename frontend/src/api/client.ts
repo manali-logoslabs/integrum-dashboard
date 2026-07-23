@@ -365,7 +365,8 @@ export const api = {
   c9: {
     kpiSummary:        (month: string, p?: Record<string, unknown>) => c9('kpi-summary', month, p).then(r => r.data as KpiSummary),
     dailySummary:      (month: string, p?: Record<string, unknown>) => c9('daily-summary', month, p).then(r => r.data as DailySummaryRow[]),
-    unitSavings:       (month: string, p?: Record<string, unknown>) => c9('unit-savings', month, p).then(r => r.data as UnitSavingsRow[]),
+    unitSavings:       (fromMonth: string, toMonth: string, p?: Record<string, unknown>) =>
+      http.get<UnitSavingsRow[]>('/c9/unit-savings', { params: { from_month: fromMonth, to_month: toMonth, ...p } }).then(r => r.data),
     todAnalysis:       (month: string, p?: Record<string, unknown>) => c9('tod-analysis', month, p).then(r => r.data as TodRow[]),
     discomBill:        (month: string, p?: Record<string, unknown>) => c9('discom-bill', month, p).then(r => r.data as DiscomBillRow[]),
     bankingLoss:       (month: string, p?: Record<string, unknown>) => c9('banking-loss', month, p).then(r => r.data as BankingLossRow[]),
