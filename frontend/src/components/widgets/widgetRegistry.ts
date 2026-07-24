@@ -84,6 +84,15 @@ export const WIDGET_REGISTRY: WidgetDef[] = [
     endpoint: 'unit-savings',
   },
   {
+    id: 'cost_summary_table',
+    name: 'Unit-wise Cost Summary',
+    description: 'Grid cost, actual cost, savings ₹ and savings % per unit (with banking)',
+    category: 'Finance',
+    size: 'full',
+    icon: '📋',
+    endpoint: 'unit-savings',
+  },
+  {
     id: 'discom_bill',
     name: 'DISCOM Bill Breakdown',
     description: 'Bill line items per unit: energy, demand, FAC, wheeling charges',

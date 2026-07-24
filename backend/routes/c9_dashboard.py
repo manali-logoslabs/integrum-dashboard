@@ -855,14 +855,24 @@ async def savings_heatmap(
             TO_CHAR(um.month, 'YYYY-MM')                                              AS month,
             um.consumption_kwh,
             um.consumption_kwh * cu.tariff_rate                                       AS grid_cost_inr,
-            (um.matched_settlement + um.matched_settlement_2) * :ppa
-            + (um.matched_settlement + um.matched_settlement_2) * :whl
-            + um.grid_consumption * cu.tariff_rate                                    AS actual_cost_inr,
+            CASE
+                WHEN um.grid_consumption = 0 THEN
+                    (um.matched_settlement + um.matched_settlement_2) * :ppa
+                ELSE
+                    (um.matched_settlement + um.matched_settlement_2) * :ppa
+                    + (um.matched_settlement + um.matched_settlement_2) * :whl
+                    + um.grid_consumption * cu.tariff_rate
+            END                                                                        AS actual_cost_inr,
             ROUND(
                 (um.consumption_kwh * cu.tariff_rate
-                 - ((um.matched_settlement + um.matched_settlement_2) * :ppa
-                    + (um.matched_settlement + um.matched_settlement_2) * :whl
-                    + um.grid_consumption * cu.tariff_rate)
+                 - CASE
+                     WHEN um.grid_consumption = 0 THEN
+                         (um.matched_settlement + um.matched_settlement_2) * :ppa
+                     ELSE
+                         (um.matched_settlement + um.matched_settlement_2) * :ppa
+                         + (um.matched_settlement + um.matched_settlement_2) * :whl
+                         + um.grid_consumption * cu.tariff_rate
+                   END
                 ) / NULLIF(um.consumption_kwh * cu.tariff_rate, 0) * 100, 1
             ) AS savings_pct
         FROM   c9_unit_monthly um
