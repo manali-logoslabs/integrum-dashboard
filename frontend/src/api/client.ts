@@ -55,16 +55,25 @@ export interface TodRow {
 export interface DiscomBillRow {
   unit_name:           string
   unit_code:           string
-  gross_amount_inr:    number
-  net_payable_inr:     number
-  savings_inr:         number
+  tariff_group?:       string
+  // totals
+  gross_amount_inr:    number   // full grid bill (no solar)
+  net_payable_inr:     number   // DISCOM bill with solar (excl. PPA)
+  total_with_re_inr:   number   // DISCOM bill + PPA cost
+  savings_inr:         number   // gross − total_with_re
+  ppa_cost_inr:        number   // payment to solar company
+  // energy
   total_units_kwh:     number
   energy_rate_per_kwh: number | null
   energy_charge_inr:   number | null
+  // demand (estimated from 15-min peak)
+  peak_demand_kva:     number
   demand_charge_inr:   number | null
+  // ancillary
   fac_inr:             number | null
   tax_inr:             number | null
   pg_surcharge_inr:    number | null
+  // wheeling
   wheeling_charge_inr: number | null
   wheeling_energy_kwh: number | null
 }
@@ -126,6 +135,49 @@ export interface KpiSummary {
   savings_pct:           number
   replacement_pct:       number
   co2_saved_tonnes:      number
+}
+
+export interface TodDailyRow {
+  date:             string
+  tod_slot:         string
+  slot_label:       string
+  generation_kwh:   number
+  consumption_kwh:  number
+}
+
+export interface MonthlyCostRow {
+  month:                       string
+  grid_cost:                   number
+  actual_cost_with_banking:    number
+  actual_cost_without_banking: number
+  savings_with_banking:        number
+  savings_without_banking:     number
+  incremental_banking_savings: number
+}
+
+export interface TodMonthlyRow {
+  month:            string
+  tod_slot:         string
+  slot_label:       string
+  generation_kwh:   number
+  consumption_kwh:  number
+}
+
+export interface ConsumptionSummaryRow {
+  month:            string
+  unit_name:        string
+  unit_code:        string
+  consumption_kwh:  number
+  gross_bill_inr:   number   // consumption × tariff_rate (energy component)
+  effective_rate:   number   // tariff_rate Rs/kWh
+}
+
+export interface TodHourlyRow {
+  hour_ts:          string   // "2025-08-01T06:00" (IST, truncated to hour)
+  tod_slot:         string
+  slot_label:       string
+  generation_kwh:   number
+  consumption_kwh:  number
 }
 
 export interface SavingsHeatmapRow {
@@ -367,7 +419,19 @@ export const api = {
     dailySummary:      (month: string, p?: Record<string, unknown>) => c9('daily-summary', month, p).then(r => r.data as DailySummaryRow[]),
     unitSavings:       (fromMonth: string, toMonth: string, p?: Record<string, unknown>) =>
       http.get<UnitSavingsRow[]>('/c9/unit-savings', { params: { from_month: fromMonth, to_month: toMonth, ...p } }).then(r => r.data),
-    todAnalysis:       (month: string, p?: Record<string, unknown>) => c9('tod-analysis', month, p).then(r => r.data as TodRow[]),
+    todAnalysis:       (month: string, p?: Record<string, unknown>, fromMonth?: string, toMonth?: string) =>
+      c9('tod-analysis', month, {
+        ...p,
+        ...(fromMonth ? { from_month: fromMonth } : {}),
+        ...(toMonth   ? { to_month:   toMonth   } : {}),
+      }).then(r => r.data as TodRow[]),
+    todDaily:          (month: string) => c9('tod-daily', month).then(r => r.data as TodDailyRow[]),
+    todMonthly:        (fromMonth: string, toMonth: string) =>
+      http.get<TodMonthlyRow[]>('/c9/tod-monthly', { params: { from_month: fromMonth, to_month: toMonth } }).then(r => r.data),
+    todHourly:         (month: string) =>
+      c9('tod-hourly', month).then(r => r.data as TodHourlyRow[]),
+    monthlyCost:       (fromMonth: string, toMonth: string, p?: Record<string, unknown>) =>
+      http.get<MonthlyCostRow[]>('/c9/monthly-cost', { params: { from_month: fromMonth, to_month: toMonth, ...p } }).then(r => r.data),
     discomBill:        (month: string, p?: Record<string, unknown>) => c9('discom-bill', month, p).then(r => r.data as DiscomBillRow[]),
     bankingLoss:       (month: string, p?: Record<string, unknown>) => c9('banking-loss', month, p).then(r => r.data as BankingLossRow[]),
     wheelingRecon:     (month: string, p?: Record<string, unknown>) => c9('wheeling-recon', month, p).then(r => r.data as WheelingReconRow[]),
@@ -375,6 +439,7 @@ export const api = {
     heatmap:           (month: string, p?: Record<string, unknown>) => c9('heatmap', month, p).then(r => r.data as HeatmapData),
     monthlyAggregate:  (fromMonth: string, toMonth: string, p?: Record<string, unknown>) =>
       http.get<MonthlyAggregateRow[]>('/c9/monthly-aggregate', { params: { from_month: fromMonth, to_month: toMonth, ...p } }).then(r => r.data),
+    consumptionSummary: () => http.get<ConsumptionSummaryRow[]>('/c9/consumption-summary').then(r => r.data),
     savingsHeatmap:    () => http.get<SavingsHeatmapRow[]>('/c9/savings-heatmap').then(r => r.data),
     units:             () => http.get<UnitMaster[]>('/c9/units').then(r => r.data),
     upload:            (formData: FormData, unitId?: number, peid?: number) =>

@@ -5,6 +5,7 @@ import React, { useState } from 'react'
 import { Routes, Route, Navigate, Link } from 'react-router-dom'
 import DashboardPage from './pages/DashboardPage'
 import GILDashboardPage from './pages/GILDashboardPage'
+import DiscomBillPage from './pages/DiscomBillPage'
 
 export const MonthContext = React.createContext<{
   month: string
@@ -67,9 +68,10 @@ export default function App() {
   return (
     <MonthContext.Provider value={{ month, setMonth }}>
       <Routes>
-        <Route path="/"    element={<ClientChooser />} />
-        <Route path="/c9"  element={<DashboardPage />} />
-        <Route path="/gil" element={<GILDashboardPage />} />
+        <Route path="/"                 element={<ClientChooser />} />
+        <Route path="/c9"               element={<DashboardPage />} />
+        <Route path="/c9/discom-bill"   element={<DiscomBillPage />} />
+        <Route path="/gil"              element={<GILDashboardPage />} />
         <Route path="*"    element={<Navigate to="/" replace />} />
       </Routes>
     </MonthContext.Provider>
