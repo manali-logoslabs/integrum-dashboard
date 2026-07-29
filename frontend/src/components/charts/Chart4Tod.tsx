@@ -12,10 +12,10 @@ import type { ChartType } from '../../pages/DashboardPage'
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend, ArcElement)
 
 const SLOT_LABELS: Record<string, string> = {
-  MORNING_PEAK:   'Morning Peak 06–09h (×1.5)',
-  DAY_NORMAL:     'Day Normal 09–18h (×1.0)',
-  EVENING_PEAK:   'Evening Peak 18–22h (×1.5)',
-  NIGHT_OFF_PEAK: 'Night Off-Peak 22–06h (×0.75)',
+  Morning_Peak:  'Morning Peak 06–09h (×1.5)',
+  Day_Normal:    'Day Normal 09–18h (×1.0)',
+  Evening_Peak:  'Evening Peak 18–22h (×1.5)',
+  Night_Offpeak: 'Night Off-Peak 22–06h (×0.75)',
 }
 
 const BAR_OPTS: any = {
@@ -47,13 +47,17 @@ const PIE_OPTS: any = {
 
 const SLOT_COLORS = ['rgba(245,166,35,.85)', 'rgba(74,158,255,.85)', 'rgba(245,50,50,.85)', 'rgba(29,191,122,.85)']
 
-export default function Chart4Tod({ month, chartType = 'bar', unitIds }: { month: string; chartType?: ChartType; unitIds?: string }) {
-  const { data, loading } = useApi(() => api.c9.todAnalysis(month, unitIds ? { unit_ids: unitIds } : undefined), [month, unitIds])
+export default function Chart4Tod({ month, chartType = 'bar', unitIds, fromMonth, toMonth }: { month: string; chartType?: ChartType; unitIds?: string; fromMonth?: string; toMonth?: string }) {
+  const { data, loading } = useApi(
+    () => api.c9.todAnalysis(month, unitIds ? { unit_ids: unitIds } : undefined, fromMonth, toMonth),
+    [month, unitIds, fromMonth, toMonth]
+  )
 
+  const label = fromMonth && toMonth ? `${fromMonth} → ${toMonth}` : month
   if (loading) return <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><div className="spinner" /></div>
-  if (!data?.length) return <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>No data for {month}</div>
+  if (!data?.length) return <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>No data for {label}</div>
 
-  const ORDER = ['MORNING_PEAK', 'DAY_NORMAL', 'EVENING_PEAK', 'NIGHT_OFF_PEAK']
+  const ORDER = ['Night_Offpeak', 'Morning_Peak', 'Day_Normal', 'Evening_Peak']
   const sorted = ORDER.map(code => data.find(r => r.tod_slot === code)).filter(Boolean) as typeof data
   const n2f = (v: any) => typeof v === 'number' ? v : parseFloat(String(v ?? 0)) || 0
   const total_gen  = sorted.reduce((s, r) => s + n2f(r.generation_kwh), 0)

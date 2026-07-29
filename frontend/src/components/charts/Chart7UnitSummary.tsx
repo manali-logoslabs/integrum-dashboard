@@ -11,7 +11,7 @@ const inr = (n: any) => '₹' + (n2f(n) / 1e5).toFixed(2) + 'L'
 const pct = (n: any) => n2f(n).toFixed(1) + '%'
 
 export default function Chart7UnitSummary({ month, unitIds }: { month: string; unitIds?: string }) {
-  const { data, loading } = useApi(() => api.c9.unitSavings(month, unitIds ? { unit_ids: unitIds } : undefined), [month, unitIds])
+  const { data, loading } = useApi(() => api.c9.unitSavings(month, month, unitIds ? { unit_ids: unitIds } : undefined), [month, unitIds])
 
   if (loading) return <div style={{ padding: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><div className="spinner" /></div>
   if (!data?.length) return <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>No data for {month}</div>

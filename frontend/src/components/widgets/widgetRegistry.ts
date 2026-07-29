@@ -42,6 +42,15 @@ export const WIDGET_REGISTRY: WidgetDef[] = [
     endpoint: 'tod-analysis',
   },
   {
+    id: 'tod_daily',
+    name: 'ToD Daily Time Series',
+    description: 'Daily generation & consumption per ToD slot — 8-line chart matching old dashboard view',
+    category: 'Generation',
+    size: 'full',
+    icon: '📈',
+    endpoint: 'tod-daily',
+  },
+  {
     id: 'heatmap_24h',
     name: '24h × 7-day Heatmap',
     description: 'Average hourly generation/consumption pattern by day-of-week',
@@ -66,7 +75,7 @@ export const WIDGET_REGISTRY: WidgetDef[] = [
   {
     id: 'banking_cost',
     name: 'Monthly Bill (With/Without Banking)',
-    description: 'Per-unit cost comparison: with banking vs without banking benefits',
+    description: 'Monthly Grid Cost vs Actual Cost stacked comparison — with and without banking savings breakdown',
     category: 'Finance',
     size: '2col',
     icon: '🏦',
@@ -84,8 +93,17 @@ export const WIDGET_REGISTRY: WidgetDef[] = [
     endpoint: 'unit-savings',
   },
   {
+    id: 'cost_summary_table',
+    name: 'Unit-wise Cost Summary',
+    description: 'Grid cost, actual cost, savings ₹ and savings % per unit (with banking)',
+    category: 'Finance',
+    size: 'full',
+    icon: '📋',
+    endpoint: 'unit-savings',
+  },
+  {
     id: 'discom_bill',
-    name: 'DISCOM Bill Breakdown',
+    name: 'DISCOM Bill – All Units',
     description: 'Bill line items per unit: energy, demand, FAC, wheeling charges',
     category: 'Finance',
     size: 'full',

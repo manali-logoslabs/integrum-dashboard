@@ -45,7 +45,7 @@ type Tab = 'cost' | 'banking' | 'table'
 
 export default function UnitSavingsPage() {
   const { month, setMonth } = useContext(MonthContext)
-  const { data, loading, error } = useApi(() => api.c9.unitSavings(month), [month])
+  const { data, loading, error } = useApi(() => api.c9.unitSavings(month, month), [month])
   const [tab, setTab] = useState<Tab>('cost')
 
   const labels = data?.map(r => SHORT[r.unit] ?? r.unit) ?? []

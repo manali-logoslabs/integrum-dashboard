@@ -63,6 +63,9 @@ export default function Chart6DiscomBill({ month, chartType = 'bar', unitIds }: 
           <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--green-l)', marginTop: 2 }}>
             ₹{(parseFloat(String(r.savings_inr ?? 0)) / 1e5).toFixed(2)}L saved
           </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+            Peak: {(r.peak_demand_kva ?? 0).toFixed(0)} kVA
+          </div>
           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>₹{r.energy_rate_per_kwh}/kWh</div>
         </div>
       ))}
@@ -108,12 +111,13 @@ export default function Chart6DiscomBill({ month, chartType = 'bar', unitIds }: 
         <Bar data={{
           labels,
           datasets: [
-            { label: 'Energy Charge',  data: data.map(r => r.energy_charge_inr ?? 0),    backgroundColor: 'rgba(74,158,255,.8)', borderRadius: 4, stack: 'gross' },
+            { label: 'Energy Charge',  data: data.map(r => r.energy_charge_inr ?? 0),    backgroundColor: 'rgba(74,158,255,.8)',  borderRadius: 4, stack: 'gross' },
             { label: 'Demand Charge',  data: data.map(r => r.demand_charge_inr ?? 0),    backgroundColor: 'rgba(155,125,255,.8)', stack: 'gross' },
             { label: 'FAC',            data: data.map(r => r.fac_inr ?? 0),              backgroundColor: 'rgba(245,166,35,.8)',  stack: 'gross' },
-            { label: 'Tax',            data: data.map(r => r.tax_inr ?? 0),              backgroundColor: 'rgba(232,72,72,.6)',   stack: 'gross' },
-            { label: 'PG Surcharge',   data: data.map(r => r.pg_surcharge_inr ?? 0),    backgroundColor: 'rgba(232,72,72,.9)',   stack: 'gross' },
-            { label: 'Wheeling',       data: data.map(r => r.wheeling_charge_inr ?? 0), backgroundColor: 'rgba(29,191,122,.7)', stack: 'gross' },
+            { label: 'P&G Surcharge',  data: data.map(r => r.pg_surcharge_inr ?? 0),    backgroundColor: 'rgba(232,72,72,.9)',   stack: 'gross' },
+            { label: 'Tax (9%)',       data: data.map(r => r.tax_inr ?? 0),              backgroundColor: 'rgba(232,72,72,.5)',   stack: 'gross' },
+            { label: 'Wheeling',       data: data.map(r => r.wheeling_charge_inr ?? 0), backgroundColor: 'rgba(29,191,122,.7)',  stack: 'gross' },
+            { label: 'PPA Cost',       data: data.map(r => r.ppa_cost_inr ?? 0),        backgroundColor: 'rgba(251,191,36,.7)',  stack: 'gross' },
           ],
         }} options={BAR_OPTS} />
       </div>
