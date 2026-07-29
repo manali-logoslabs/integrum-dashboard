@@ -20,10 +20,6 @@ import Chart4Tod            from '../components/charts/Chart4Tod'
 import Chart5Banking        from '../components/charts/Chart5Banking'
 import Chart6DiscomBill     from '../components/charts/Chart6DiscomBill'
 import Chart7UnitSummary    from '../components/charts/Chart7UnitSummary'
-import Chart8BankingLoss    from '../components/charts/Chart8BankingLoss'
-import Chart10Wheeling      from '../components/charts/Chart10Wheeling'
-import Chart11Surplus            from '../components/charts/Chart11Surplus'
-import Chart15Heatmap            from '../components/charts/Chart15Heatmap'
 import ChartCostSummaryTable     from '../components/charts/ChartCostSummaryTable'
 import ChartTodDaily             from '../components/charts/ChartTodDaily'
 
@@ -54,22 +50,17 @@ const CHART_TYPES: Record<string, ChartType[]> = {
   tod_analysis:    ['bar', 'pie', 'doughnut'],
   banking_cost:    ['bar', 'line', 'pie'],
   discom_bill:     ['bar', 'line', 'pie'],
-  banking_loss:    ['bar', 'pie', 'doughnut'],
-  wheeling_recon:  ['bar', 'pie'],
-  surplus_flow:    ['bar', 'line'],
   unit_summary:         ['table'],
   cost_summary_table:   ['table'],
   tod_daily:            ['line'],
   kpi_cards:            ['table'],
   savings_heatmap: ['table'],
-  heatmap_24h:     ['table'],
 }
 const TYPE_ICONS: Record<ChartType, string>  = { monthly:'M', bar:'B', line:'L', area:'A', pie:'P', doughnut:'D', table:'T' }
 const TYPE_LABELS: Record<ChartType, string> = { monthly:'Monthly', bar:'Bar', line:'Line', area:'Area', pie:'Pie', doughnut:'Donut', table:'Table' }
 const EXPORT_CHART_KEY: Record<string, string> = {
   gen_cons_daily:'daily-summary', power_cost:'unit-savings', unit_summary:'unit-savings',
-  tod_analysis:'tod-analysis', banking_loss:'banking-loss', surplus_flow:'surplus-absorption',
-  wheeling_recon:'wheeling-recon',
+  tod_analysis:'tod-analysis',
 }
 const TOD_SLOTS = [
   { value:'', label:'All TOD Slots' },
@@ -94,10 +85,6 @@ function WidgetContent({ widgetId, filters, chartType }: { widgetId: string; fil
     case 'unit_summary':         return <Chart7UnitSummary      month={month} unitIds={uid} />
     case 'cost_summary_table':   return <ChartCostSummaryTable  month={month} fromMonth={fromMonth} toMonth={toMonth} unitIds={uid} />
     case 'tod_daily':            return <ChartTodDaily          month={month} fromMonth={fromMonth} toMonth={toMonth} />
-    case 'banking_loss':    return <Chart8BankingLoss     month={month} chartType={chartType} unitIds={uid} />
-    case 'wheeling_recon':  return <Chart10Wheeling       month={month} chartType={chartType} unitIds={uid} />
-    case 'surplus_flow':    return <Chart11Surplus        month={month} chartType={chartType} unitIds={uid} />
-    case 'heatmap_24h':     return <Chart15Heatmap        month={month} />
     default: return <div style={{ padding:16, color:'var(--text-muted)', fontSize:12 }}>Unknown widget</div>
   }
 }

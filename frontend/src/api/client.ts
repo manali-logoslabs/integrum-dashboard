@@ -84,51 +84,6 @@ export interface DiscomBillRow {
   wheeling_energy_kwh: number | null
 }
 
-export interface BankingLossRow {
-  unit:               string
-  unit_code:          string
-  gross_banked_kwh:   number
-  banking_loss_kwh:   number
-  net_banked_kwh:     number
-  settled_kwh:        number
-  expired_kwh:        number
-  closing_balance_kwh:number
-  loss_inr:           number
-}
-
-export interface WheelingReconRow {
-  unit:         string
-  unit_code:    string
-  proposed_kwh: number
-  actual_kwh:   number
-  gap_kwh:      number
-  gap_inr:      number
-  status:       'OK' | 'OVER' | 'UNDER' | 'INFO'
-}
-
-export interface SurplusAbsorptionRow {
-  unit:                  string
-  unit_code:             string
-  generation_kwh:        number
-  consumption_kwh:       number
-  direct_matched_kwh:    number
-  gross_surplus_kwh:     number
-  banking_settled_kwh:   number
-  banking_expired_kwh:   number
-  grid_drawl_kwh:        number
-  total_matched_kwh:     number
-  replacement_pct:       number
-  closing_balance_kwh?:  number
-}
-
-export interface HeatmapData {
-  hours:       number[]
-  days:        string[]
-  net_matrix:  (number | null)[][]
-  gen_matrix:  (number | null)[][]
-  cons_matrix: (number | null)[][]
-}
-
 export interface KpiSummary {
   month:                 string
   total_generation_kwh:  number
@@ -452,18 +407,6 @@ export const api = {
     discomBill:        (month: string, p?: Record<string, unknown>) =>
       DEMO_MODE ? m(MOCK_DATA.discomBill as unknown as DiscomBillRow[])
                 : c9('discom-bill', month, p).then(r => r.data as DiscomBillRow[]),
-    bankingLoss:       (month: string, p?: Record<string, unknown>) =>
-      DEMO_MODE ? m(MOCK_DATA.bankingLoss as unknown as BankingLossRow[])
-                : c9('banking-loss', month, p).then(r => r.data as BankingLossRow[]),
-    wheelingRecon:     (month: string, p?: Record<string, unknown>) =>
-      DEMO_MODE ? m(MOCK_DATA.wheelingRecon as unknown as WheelingReconRow[])
-                : c9('wheeling-recon', month, p).then(r => r.data as WheelingReconRow[]),
-    surplusAbsorption: (month: string, p?: Record<string, unknown>) =>
-      DEMO_MODE ? m(MOCK_DATA.surplusAbsorption as unknown as SurplusAbsorptionRow[])
-                : c9('surplus-absorption', month, p).then(r => r.data as SurplusAbsorptionRow[]),
-    heatmap:           (month: string, p?: Record<string, unknown>) =>
-      DEMO_MODE ? m(MOCK_DATA.heatmap as unknown as HeatmapData)
-                : c9('heatmap', month, p).then(r => r.data as HeatmapData),
     monthlyAggregate:  (fromMonth: string, toMonth: string, p?: Record<string, unknown>) =>
       DEMO_MODE ? m(MOCK_DATA.monthlyAgg as unknown as MonthlyAggregateRow[])
                 : http.get<MonthlyAggregateRow[]>('/c9/monthly-aggregate', { params: { from_month: fromMonth, to_month: toMonth, ...p } }).then(r => r.data),

@@ -7,10 +7,6 @@ const NAV = [
   { label: 'Unit Cost Analysis', path: '/c9/unit-savings' },
   { label: 'TOD Analysis',       path: '/c9/tod' },
   { label: 'DISCOM Bill',        path: '/c9/discom-bill' },
-  { label: 'Banking & Loss',     path: '/c9/banking' },
-  { label: 'Wheeling Recon',     path: '/c9/wheeling' },
-  { label: 'Surplus Absorption', path: '/c9/surplus' },
-  { label: 'Energy Heatmap',     path: '/c9/heatmap' },
 ]
 
 const styles: Record<string, React.CSSProperties> = {

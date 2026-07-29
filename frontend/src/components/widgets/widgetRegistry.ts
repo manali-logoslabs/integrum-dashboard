@@ -50,27 +50,6 @@ export const WIDGET_REGISTRY: WidgetDef[] = [
     icon: '📈',
     endpoint: 'tod-daily',
   },
-  {
-    id: 'heatmap_24h',
-    name: '24h × 7-day Heatmap',
-    description: 'Average hourly generation/consumption pattern by day-of-week',
-    category: 'Generation',
-    size: 'full',
-    icon: '🗓️',
-    chartId: 15,
-    endpoint: 'heatmap',
-  },
-  {
-    id: 'surplus_flow',
-    name: 'Surplus & Absorption',
-    description: 'Energy flow: Generation → Direct Match → Banking → Surplus Lapsed',
-    category: 'Generation',
-    size: 'full',
-    icon: '🔄',
-    chartId: 11,
-    endpoint: 'surplus-absorption',
-  },
-
   // ── Finance ────────────────────────────────────────────────────
   {
     id: 'banking_cost',
@@ -133,28 +112,7 @@ export const WIDGET_REGISTRY: WidgetDef[] = [
     chartId: 3,
     endpoint: 'unit-savings',
   },
-  {
-    id: 'wheeling_recon',
-    name: 'Wheeling Reconciliation',
-    description: 'Proposed vs actual wheeled units; coverage gap per unit',
-    category: 'Analysis',
-    size: '2col',
-    icon: '⚖️',
-    chartId: 10,
-    endpoint: 'wheeling-recon',
-  },
-
   // ── Operations ─────────────────────────────────────────────────
-  {
-    id: 'banking_loss',
-    name: 'Banking Loss Analysis',
-    description: 'Gross banked, 8% loss, net settled, expired per unit per month',
-    category: 'Operations',
-    size: '2col',
-    icon: '📉',
-    chartId: 8,
-    endpoint: 'banking-loss',
-  },
   {
     id: 'kpi_cards',
     name: 'KPI Overview Cards',
