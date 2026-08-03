@@ -2,11 +2,11 @@ import React from 'react'
 import { NavLink } from 'react-router-dom'
 
 const NAV = [
-  { label: 'Overview',           path: '/' },
-  { label: 'Generation & Consumption', path: '/c9/daily' },
-  { label: 'Unit Cost Analysis', path: '/c9/unit-savings' },
-  { label: 'TOD Analysis',       path: '/c9/tod' },
-  { label: 'DISCOM Bill',        path: '/c9/discom-bill' },
+  { label: 'Overview',                path: '/old/c9' },
+  { label: 'Generation & Consumption', path: '/old/c9/daily' },
+  { label: 'Unit Cost Analysis',      path: '/old/c9/unit-savings' },
+  { label: 'TOD Analysis',            path: '/old/c9/tod' },
+  { label: 'DISCOM Bill',             path: '/old/c9/discom-bill' },
 ]
 
 const styles: Record<string, React.CSSProperties> = {

@@ -1,61 +1,32 @@
 /**
- * App.tsx — Routes /c9 to C9 Dashboard, /gil to GIL Dashboard.
+ * App.tsx
+ * Route map:
+ *   /                            → redirect → /new (new landing)
+ *   /new                         → LandingPage (client selector)
+ *   /new/:clientId/select-state  → StateSelectPage (state selector)
+ *   /new/c9                      → C9 dashboard v2
+ *   /new/c9/*                    → New C9 sub-pages
+ *   /old/c9                      → C9 dashboard v1 (reference, do not modify)
+ *   /old/gil                     → GIL dashboard v1
  */
 import React, { useState } from 'react'
-import { Routes, Route, Navigate, Link } from 'react-router-dom'
-import DashboardPage from './pages/DashboardPage'
-import GILDashboardPage from './pages/GILDashboardPage'
-import DiscomBillPage from './pages/DiscomBillPage'
+import { Routes, Route, Navigate } from 'react-router-dom'
 
+// ── Old dashboard (v1, preserved) ──────────────────────────────────────────
+import DashboardPage    from './pages/DashboardPage'
+import GILDashboardPage from './pages/GILDashboardPage'
+import DiscomBillPage   from './pages/DiscomBillPage'
+
+// ── New dashboard (v2) ──────────────────────────────────────────────────────
+import LandingPage     from './pages/new/LandingPage'
+import StateSelectPage from './pages/new/StateSelectPage'
+import NewC9Page       from './pages/new/c9/NewC9Page'
+
+// ── Shared context (used by v1 pages) ──────────────────────────────────────
 export const MonthContext = React.createContext<{
   month: string
   setMonth: (m: string) => void
 }>({ month: '2025-08', setMonth: () => {} })
-
-const cardBase: React.CSSProperties = {
-  borderRadius: '1rem',
-  padding: '2rem 3rem',
-  cursor: 'pointer',
-  color: '#fff',
-  textAlign: 'center',
-  minWidth: '240px',
-  transition: 'transform 0.15s',
-}
-
-function ClientChooser() {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: '#0f172a', gap: '2rem' }}>
-      <div style={{ textAlign: 'center', color: '#94a3b8', marginBottom: '1rem' }}>
-        <h1 style={{ fontSize: '2rem', color: '#f8fafc', fontWeight: 700, margin: 0 }}>
-          Integrum Intelligence Dashboard
-        </h1>
-        <p style={{ margin: '0.5rem 0 0', fontSize: '1rem' }}>
-          Select a client dashboard to continue
-        </p>
-      </div>
-      <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', justifyContent: 'center' }}>
-        <Link to="/c9" style={{ textDecoration: 'none' }}>
-          <div style={{ ...cardBase, background: '#1d4ed8', boxShadow: '0 4px 24px rgba(59,130,246,0.35)' }}>
-            <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>☀️</div>
-            <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>C9 Dashboard</div>
-            <div style={{ fontSize: '0.85rem', opacity: 0.85, marginTop: '0.4rem' }}>
-              BESCOM · Solar · Karnataka
-            </div>
-          </div>
-        </Link>
-        <Link to="/gil" style={{ textDecoration: 'none' }}>
-          <div style={{ ...cardBase, background: '#065f46', boxShadow: '0 4px 24px rgba(16,185,129,0.35)' }}>
-            <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>🌬️</div>
-            <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>GIL Dashboard</div>
-            <div style={{ fontSize: '0.85rem', opacity: 0.85, marginTop: '0.4rem' }}>
-              MSEDCL · Wind+Solar · Maharashtra
-            </div>
-          </div>
-        </Link>
-      </div>
-    </div>
-  )
-}
 
 export default function App() {
   const [month, setMonth] = useState(() => {
@@ -68,11 +39,27 @@ export default function App() {
   return (
     <MonthContext.Provider value={{ month, setMonth }}>
       <Routes>
-        <Route path="/"                 element={<ClientChooser />} />
-        <Route path="/c9"               element={<DashboardPage />} />
-        <Route path="/c9/discom-bill"   element={<DiscomBillPage />} />
-        <Route path="/gil"              element={<GILDashboardPage />} />
-        <Route path="*"    element={<Navigate to="/" replace />} />
+        {/* Root → new landing */}
+        <Route path="/" element={<Navigate to="/new" replace />} />
+
+        {/* ── New dashboard (v2) ── */}
+        <Route path="/new"                          element={<LandingPage />} />
+        <Route path="/new/:clientId/select-state"   element={<StateSelectPage />} />
+        <Route path="/new/c9"                       element={<NewC9Page />} />
+        <Route path="/new/c9/*"                     element={<NewC9Page />} />
+
+        {/* ── Old dashboard (v1, preserved) ── */}
+        <Route path="/old/c9"             element={<DashboardPage />} />
+        <Route path="/old/c9/discom-bill" element={<DiscomBillPage />} />
+        <Route path="/old/gil"            element={<GILDashboardPage />} />
+
+        {/* Legacy short routes → redirect */}
+        <Route path="/c9"   element={<Navigate to="/old/c9"  replace />} />
+        <Route path="/c9/*" element={<Navigate to="/old/c9"  replace />} />
+        <Route path="/gil"  element={<Navigate to="/old/gil" replace />} />
+
+        {/* Fallback */}
+        <Route path="*" element={<Navigate to="/new" replace />} />
       </Routes>
     </MonthContext.Provider>
   )
